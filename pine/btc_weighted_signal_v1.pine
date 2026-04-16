@@ -1,0 +1,64 @@
+//@version=6
+indicator("BTC Weighted Signal V1 (EMA75+MACD25)", overlay=true)
+
+scoreThreshold = input.int(75, "Signal Threshold", minval=1, maxval=100)
+ema55Len  = input.int(55,  "EMA 55")
+ema69Len  = input.int(69,  "EMA 69")
+ema144Len = input.int(144, "EMA 144")
+ema169Len = input.int(169, "EMA 169")
+
+macdFast   = input.int(12, "MACD Fast")
+macdSlow   = input.int(26, "MACD Slow")
+macdSignal = input.int(9,  "MACD Signal")
+
+dTrendEmaLen = input.int(169, "Daily EMA")
+wTrendEmaLen = input.int(169, "Weekly EMA")
+
+ema55  = ta.ema(close, ema55Len)
+ema69  = ta.ema(close, ema69Len)
+ema144 = ta.ema(close, ema144Len)
+ema169 = ta.ema(close, ema169Len)
+
+[macdLine, macdSig, _] = ta.macd(close, macdFast, macdSlow, macdSignal)
+
+zoneLow  = math.min(ema144, ema169)
+zoneHigh = math.max(ema144, ema169)
+inZone   = close >= zoneLow and close <= zoneHigh
+
+// Major trend filter (D + W)
+dClose = request.security(syminfo.tickerid, "D", close)
+wClose = request.security(syminfo.tickerid, "W", close)
+dEma   = request.security(syminfo.tickerid, "D", ta.ema(close, dTrendEmaLen))
+wEma   = request.security(syminfo.tickerid, "W", ta.ema(close, wTrendEmaLen))
+
+majorBull = dClose > dEma and wClose > wEma
+majorBear = dClose < dEma and wClose < wEma
+
+emaBearStruct = (ema144 > ema69) and (ema169 > ema55)
+emaBullStruct = (ema144 < ema69) and (ema169 < ema55)
+
+firstEnterForShort = (close[1] < zoneLow[1]) and inZone
+firstEnterForLong  = (close[1] > zoneHigh[1]) and inZone
+
+emaShortSignal = emaBearStruct and firstEnterForShort
+emaLongSignal  = emaBullStruct and firstEnterForLong
+
+macdLongSignal  = ta.crossover(macdLine, macdSig)
+macdShortSignal = ta.crossunder(macdLine, macdSig)
+
+longScore  = (emaLongSignal ? 75 : 0) + (macdLongSignal ? 25 : 0)
+shortScore = (emaShortSignal ? 75 : 0) + (macdShortSignal ? 25 : 0)
+
+longFinal  = majorBull and longScore >= scoreThreshold
+shortFinal = majorBear and shortScore >= scoreThreshold
+
+plot(ema55,  "EMA55", color=color.green)
+plot(ema69,  "EMA69", color=color.teal)
+plot(ema144, "EMA144", color=color.orange)
+plot(ema169, "EMA169", color=color.blue)
+
+plotshape(longFinal, title="Long", style=shape.triangleup, location=location.belowbar, color=color.lime, text="Long")
+plotshape(shortFinal, title="Short", style=shape.triangledown, location=location.abovebar, color=color.red, text="Short")
+
+alertcondition(longFinal, title="Long Signal", message="BTC Long signal")
+alertcondition(shortFinal, title="Short Signal", message="BTC Short signal")
