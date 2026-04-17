@@ -6,7 +6,7 @@ A BTC quantitative strategy repo focused on **backtesting first** and going live
 
 - `pine/btc_weighted_signal_v1.pine`: TradingView signal script (EMA 75% + MACD 25%).
 - `quant_btc/`: Python backtesting implementation of the weighted signal strategy.
-- `run_backtest.py`: one-command backtest runner.
+- `run_backtest.py`: one-command backtest runner (exchange data).
 
 ## Strategy logic (current phase)
 
@@ -28,8 +28,22 @@ pip install -r requirements.txt
 python run_backtest.py
 ```
 
+## US IP / Binance restriction behavior
+
+If `binance` is restricted/unreachable from your location, the data layer will automatically fallback to `binanceus`.
+
+```bash
+# default: binance with automatic fallback to binanceus
+python run_backtest.py
+
+# explicitly use binanceus
+python run_backtest.py --exchange binanceus
+
+# disable fallback (debug only)
+python run_backtest.py --disable-binanceus-fallback
+```
+
 ## Notes
 
-- This repo uses **historical market data** from Binance public endpoints for backtesting.
-- No private key is required unless you later add order execution.
+- Public market data requests do not require API keys.
 - Before live deployment, add execution-layer controls: slippage model, funding cost, TP/SL, max drawdown guard, and paper-trading phase.
