@@ -3,7 +3,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pandas_ta as ta
-from backtesting import Backtest, Strategy
+from backtesting import Strategy
+from backtesting.lib import FractionalBacktest
 
 from quant_btc.config import BacktestConfig
 
@@ -71,6 +72,7 @@ def prepare_features(df: pd.DataFrame, cfg: BacktestConfig) -> pd.DataFrame:
 
 class WeightedSignalStrategy(Strategy):
     cooldown_bars = 12
+    trade_size_fraction = 0.95
 
     def init(self):
         self.last_trade_bar = -10**9
@@ -94,20 +96,21 @@ class WeightedSignalStrategy(Strategy):
             return
 
         if long_entry:
-            self.buy()
+            self.buy(size=self.trade_size_fraction)
             self.last_trade_bar = i
         elif short_entry:
-            self.sell()
+            self.sell(size=self.trade_size_fraction)
             self.last_trade_bar = i
 
 
 def run_backtest(df: pd.DataFrame, cfg: BacktestConfig):
-    bt = Backtest(
+    bt = FractionalBacktest(
         df,
         WeightedSignalStrategy,
         cash=cfg.initial_cash,
         commission=cfg.commission,
         exclusive_orders=True,
         hedging=False,
+        finalize_trades=True,
     )
-    return bt.run(), bt
+    return bt.run(trade_size_fraction=cfg.trade_size_fraction, cooldown_bars=cfg.cooldown_bars), bt

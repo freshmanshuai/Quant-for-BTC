@@ -8,6 +8,7 @@ class BacktestConfig:
     limit: int = 3000
     initial_cash: float = 100_000
     commission: float = 0.0006
+    trade_size_fraction: float = 0.95  # 0~1, fraction of equity per trade
 
     # Weighted score model
     ema_weight: int = 75
