@@ -30,6 +30,10 @@ def _fetch_from_exchange(
     timeout_ms: int,
     max_retries: int,
 ) -> pd.DataFrame:
+    # Use CCXT's native endpoint routing for each exchange.
+    # Do not override exchange.urls["api"], otherwise paths like /api/v3 can be lost.
+    exchange = getattr(ccxt, exchange_id)({"enableRateLimit": True, "timeout": timeout_ms})
+
     exchange = getattr(ccxt, exchange_id)({"enableRateLimit": True, "timeout": timeout_ms})
 
     if exchange_id in DEFAULT_BASE_URLS:
@@ -72,6 +76,7 @@ def fetch_ohlcv(
     """
     try:
         return _fetch_from_exchange(symbol, timeframe, limit, exchange_id, timeout_ms, max_retries)
+    except DataFetchError:
     except DataFetchError as primary_error:
         should_fallback = exchange_id == "binance" and fallback_to_binanceus
         if not should_fallback:
