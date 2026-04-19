@@ -23,10 +23,16 @@ def _fetch_from_exchange(
     exchange_id: str,
     timeout_ms: int,
     max_retries: int,
+    proxy_url: str | None,
 ) -> pd.DataFrame:
     # Use CCXT's native endpoint routing for each exchange.
     # Do not override exchange.urls["api"], otherwise paths like /api/v3 can be lost.
-    exchange = getattr(ccxt, exchange_id)({"enableRateLimit": True, "timeout": timeout_ms})
+    exchange_config = {"enableRateLimit": True, "timeout": timeout_ms}
+    if proxy_url:
+        exchange_config["httpProxy"] = proxy_url
+        exchange_config["httpsProxy"] = proxy_url
+
+    exchange = getattr(ccxt, exchange_id)(exchange_config)
 
     last_error: Exception | None = None
     for attempt in range(1, max_retries + 1):
@@ -54,6 +60,7 @@ def fetch_ohlcv(
     timeout_ms: int = 20_000,
     max_retries: int = 3,
     fallback_to_binanceus: bool = True,
+    proxy_url: str | None = None,
 ) -> pd.DataFrame:
     """Fetch historical OHLCV bars with optional Binance->BinanceUS fallback.
 
@@ -61,11 +68,15 @@ def fetch_ohlcv(
     automatically retry on BinanceUS when `fallback_to_binanceus=True`.
     """
     try:
-        return _fetch_from_exchange(symbol, timeframe, limit, exchange_id, timeout_ms, max_retries)
+        return _fetch_from_exchange(
+            symbol, timeframe, limit, exchange_id, timeout_ms, max_retries, proxy_url
+        )
     except DataFetchError:
         should_fallback = exchange_id == "binance" and fallback_to_binanceus
         if not should_fallback:
             raise
 
         # Fallback for US users or restricted-location responses from Binance main site.
-        return _fetch_from_exchange(symbol, timeframe, limit, "binanceus", timeout_ms, max_retries)
+        return _fetch_from_exchange(
+            symbol, timeframe, limit, "binanceus", timeout_ms, max_retries, proxy_url
+        )

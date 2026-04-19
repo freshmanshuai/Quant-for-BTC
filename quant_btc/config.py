@@ -10,6 +10,9 @@ class BacktestConfig:
     commission: float = 0.0006
     trade_size_fraction: float = 0.95  # 0~1, fraction of equity per trade
 
+    # Default local proxy (can be overridden by CLI/env)
+    proxy_url: str = "http://127.0.0.1:7897"
+
     # Weighted score model
     ema_weight: int = 75
     macd_weight: int = 25

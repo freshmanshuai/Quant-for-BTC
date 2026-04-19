@@ -1,4 +1,5 @@
 import argparse
+import os
 
 from quant_btc.config import BacktestConfig
 from quant_btc.data import DataFetchError, fetch_ohlcv
@@ -13,6 +14,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=3000)
     parser.add_argument("--timeout-ms", type=int, default=20000)
     parser.add_argument("--max-retries", type=int, default=3)
+    parser.add_argument("--proxy-url", type=str, default=None, help="Proxy URL, e.g. http://127.0.0.1:7897")
     parser.add_argument(
         "--disable-binanceus-fallback",
         action="store_true",
@@ -25,8 +27,17 @@ def main():
     args = parse_args()
     cfg = BacktestConfig(symbol=args.symbol, timeframe=args.timeframe, limit=args.limit)
 
+    # Priority: CLI --proxy-url > environment > config default
+    proxy_url = args.proxy_url or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or cfg.proxy_url
+
+    # Keep requests/urllib3 env vars in sync for dependencies that read env only
+    os.environ.setdefault("HTTP_PROXY", proxy_url)
+    os.environ.setdefault("HTTPS_PROXY", proxy_url)
+    os.environ.setdefault("ALL_PROXY", proxy_url)
+
     try:
         print(f"Fetching {cfg.symbol} {cfg.timeframe} history from {args.exchange}...")
+        print(f"Using proxy: {proxy_url}")
         raw = fetch_ohlcv(
             symbol=cfg.symbol,
             timeframe=cfg.timeframe,
@@ -35,10 +46,11 @@ def main():
             timeout_ms=args.timeout_ms,
             max_retries=args.max_retries,
             fallback_to_binanceus=not args.disable_binanceus_fallback,
+            proxy_url=proxy_url,
         )
     except DataFetchError as exc:
         print("\n[Data Error]", exc)
-        print("Hint: try --exchange binanceus or increase --timeout-ms / --max-retries")
+        print("Hint: check proxy availability, then try --proxy-url, --timeout-ms, and --max-retries")
         return
 
     df = prepare_features(raw, cfg)

@@ -39,6 +39,9 @@ python run_backtest.py
 # explicitly use binanceus
 python run_backtest.py --exchange binanceus
 
+# use explicit local proxy (recommended if env proxy is unstable)
+python run_backtest.py --proxy-url http://127.0.0.1:7897
+
 # disable fallback (debug only)
 python run_backtest.py --disable-binanceus-fallback
 ```
