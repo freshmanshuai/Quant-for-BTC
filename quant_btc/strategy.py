@@ -8,23 +8,33 @@ from backtesting import Backtest, Strategy
 from quant_btc.config import BacktestConfig
 
 
+def _ema(series: pd.Series, length: int) -> pd.Series:
+    """Robust EMA that always returns numeric dtype (never Python None)."""
+    return series.ewm(span=length, adjust=False, min_periods=1).mean()
+
+
+def _htf_ema(close: pd.Series, rule: str, length: int) -> pd.Series:
+    """Compute HTF EMA on resampled close and forward-fill back to LTF index."""
+    htf_close = close.resample(rule).last().ffill()
+    htf_ema = _ema(htf_close, length)
+    return htf_ema.reindex(close.index, method="ffill")
+
+
 def prepare_features(df: pd.DataFrame, cfg: BacktestConfig) -> pd.DataFrame:
     out = df.copy()
 
-    out["ema55"] = ta.ema(out["Close"], length=cfg.ema_fast_1)
-    out["ema69"] = ta.ema(out["Close"], length=cfg.ema_fast_2)
-    out["ema144"] = ta.ema(out["Close"], length=cfg.ema_slow_1)
-    out["ema169"] = ta.ema(out["Close"], length=cfg.ema_slow_2)
+    out["ema55"] = _ema(out["Close"], cfg.ema_fast_1)
+    out["ema69"] = _ema(out["Close"], cfg.ema_fast_2)
+    out["ema144"] = _ema(out["Close"], cfg.ema_slow_1)
+    out["ema169"] = _ema(out["Close"], cfg.ema_slow_2)
 
     macd = ta.macd(out["Close"], fast=cfg.macd_fast, slow=cfg.macd_slow, signal=cfg.macd_signal)
     out["macd"] = macd[f"MACD_{cfg.macd_fast}_{cfg.macd_slow}_{cfg.macd_signal}"]
     out["macd_signal"] = macd[f"MACDs_{cfg.macd_fast}_{cfg.macd_slow}_{cfg.macd_signal}"]
 
-    # Approximate HTF trend on 4H bars: 1D ~= 6 bars, 1W ~= 42 bars
-    daily_equiv = cfg.daily_ema_len * 6
-    weekly_equiv = cfg.weekly_ema_len * 42
-    out["d_ema"] = ta.ema(out["Close"], length=daily_equiv)
-    out["w_ema"] = ta.ema(out["Close"], length=weekly_equiv)
+    # True HTF EMA filter: calculate on daily/weekly closes then map back to LTF bars.
+    out["d_ema"] = _htf_ema(out["Close"], "1D", cfg.daily_ema_len)
+    out["w_ema"] = _htf_ema(out["Close"], "1W", cfg.weekly_ema_len)
 
     zone_low = np.minimum(out["ema144"], out["ema169"])
     zone_high = np.maximum(out["ema144"], out["ema169"])
