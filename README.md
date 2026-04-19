@@ -1,2 +1,52 @@
 # Quant-for-BTC
-A quantitative strategy for BTC
+
+A BTC quantitative strategy repo focused on **backtesting first** and going live only after stable performance.
+
+## What's included
+
+- `pine/btc_weighted_signal_v1.pine`: TradingView signal script (EMA 75% + MACD 25%).
+- `quant_btc/`: Python backtesting implementation of the weighted signal strategy.
+- `run_backtest.py`: one-command backtest runner (exchange data).
+
+## Strategy logic (current phase)
+
+- Trade timeframe: 1H or 4H (default 4H).
+- Multi-timeframe bias: daily + weekly trend filter.
+- Signal score:
+  - EMA structure + first-touch zone logic = 75 points
+  - MACD crossover = 25 points
+- Trigger when score >= threshold (default 75).
+- Long and short both enabled.
+- No TP/SL yet (as requested); exits happen on opposite signal.
+
+## Quick start (backtest only)
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python run_backtest.py
+```
+
+## US IP / Binance restriction behavior
+
+If `binance` is restricted/unreachable from your location, the data layer will automatically fallback to `binanceus`.
+
+```bash
+# default: binance with automatic fallback to binanceus
+python run_backtest.py
+
+# explicitly use binanceus
+python run_backtest.py --exchange binanceus
+
+# use explicit local proxy (recommended if env proxy is unstable)
+python run_backtest.py --proxy-url http://127.0.0.1:7897
+
+# disable fallback (debug only)
+python run_backtest.py --disable-binanceus-fallback
+```
+
+## Notes
+
+- Public market data requests do not require API keys.
+- Before live deployment, add execution-layer controls: slippage model, funding cost, TP/SL, max drawdown guard, and paper-trading phase.
