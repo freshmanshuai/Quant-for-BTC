@@ -1,4 +1,11 @@
+<<<<<<< HEAD
 ccxt>=4.4.0
 pandas>=2.0.0
 numpy>=1.24.0
 backtesting>=0.3.3
+=======
+ccxt>=4.4.0
+pandas>=2.0.0
+numpy>=1.24.0
+backtesting>=0.3.3
+>>>>>>> b6341614eceef773f2a8872003e05493770ecfe1
