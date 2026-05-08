@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import pandas_ta as ta
 from backtesting import Strategy
 from backtesting.lib import FractionalBacktest
 
@@ -12,6 +11,15 @@ from quant_btc.config import BacktestConfig
 def _ema(series: pd.Series, length: int) -> pd.Series:
     """Robust EMA that always returns numeric dtype (never Python None)."""
     return series.ewm(span=length, adjust=False, min_periods=1).mean()
+
+
+def _macd(close: pd.Series, fast: int, slow: int, signal: int):
+    """Compute MACD line and signal line. Returns (macd_line, signal_line)."""
+    ema_fast = _ema(close, fast)
+    ema_slow = _ema(close, slow)
+    macd_line = ema_fast - ema_slow
+    signal_line = _ema(macd_line, signal)
+    return macd_line, signal_line
 
 
 def _htf_ema(close: pd.Series, rule: str, length: int) -> pd.Series:
@@ -29,9 +37,7 @@ def prepare_features(df: pd.DataFrame, cfg: BacktestConfig) -> pd.DataFrame:
     out["ema144"] = _ema(out["Close"], cfg.ema_slow_1)
     out["ema169"] = _ema(out["Close"], cfg.ema_slow_2)
 
-    macd = ta.macd(out["Close"], fast=cfg.macd_fast, slow=cfg.macd_slow, signal=cfg.macd_signal)
-    out["macd"] = macd[f"MACD_{cfg.macd_fast}_{cfg.macd_slow}_{cfg.macd_signal}"]
-    out["macd_signal"] = macd[f"MACDs_{cfg.macd_fast}_{cfg.macd_slow}_{cfg.macd_signal}"]
+    out["macd"], out["macd_signal"] = _macd(out["Close"], fast=cfg.macd_fast, slow=cfg.macd_slow, signal=cfg.macd_signal)
 
     # True HTF EMA filter: calculate on daily/weekly closes then map back to LTF bars.
     out["d_ema"] = _htf_ema(out["Close"], "1D", cfg.daily_ema_len)
