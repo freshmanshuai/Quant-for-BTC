@@ -16,6 +16,48 @@ def _to_ohlcv_df(rows: list[list]) -> pd.DataFrame:
     return df.set_index("timestamp")
 
 
+_BATCH_SIZE = 1000  # Max candles per request for Binance/BinanceUS
+_MAX_PAGES = 100  # Safety upper bound
+
+
+def _fetch_paginated(
+    exchange: ccxt.Exchange,
+    symbol: str,
+    timeframe: str,
+    limit: int,
+) -> list[list]:
+    """Fetch OHLCV with pagination to exceed exchange per-request limits.
+
+    Paginates backward from the latest candle, using ``endTime`` to request
+    successively older batches.  Returns a chronologically ordered list of
+    raw OHLCV rows (oldest first).
+    """
+    all_rows: list[list] = []
+    end_time: int | None = None
+
+    for _ in range(_MAX_PAGES):
+        remaining = limit - len(all_rows)
+        if remaining <= 0:
+            break
+
+        batch_limit = min(_BATCH_SIZE, remaining)
+        params: dict = {}
+        if end_time is not None:
+            params["endTime"] = end_time
+
+        rows = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=batch_limit, params=params)
+        if not rows:
+            break
+
+        all_rows = rows + all_rows  # prepend — rows are old→new
+        end_time = rows[0][0]  # exclusive boundary for next (older) page
+
+        if len(rows) < batch_limit:
+            break
+
+    return all_rows
+
+
 def _fetch_from_exchange(
     symbol: str,
     timeframe: str,
@@ -29,7 +71,6 @@ def _fetch_from_exchange(
     # Do not override exchange.urls["api"], otherwise paths like /api/v3 can be lost.
     exchange_config = {"enableRateLimit": True, "timeout": timeout_ms}
     if proxy_url:
-        exchange_config["httpProxy"] = proxy_url
         exchange_config["httpsProxy"] = proxy_url
 
     exchange = getattr(ccxt, exchange_id)(exchange_config)
@@ -37,7 +78,7 @@ def _fetch_from_exchange(
     last_error: Exception | None = None
     for attempt in range(1, max_retries + 1):
         try:
-            rows = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+            rows = _fetch_paginated(exchange, symbol, timeframe, limit)
             if not rows:
                 raise DataFetchError(f"Fetched empty OHLCV dataset from {exchange_id}.")
             return _to_ohlcv_df(rows)
