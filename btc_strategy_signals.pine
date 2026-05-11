@@ -1,0 +1,567 @@
+//@version=5
+// ─────────────────────────────────────────────────────────────────────────────
+//  BTC Multi-Layer Quant Strategy — TradingView Signal Script
+//  Translated from Python backtesting system (Quant-for-BTC)
+//
+//  Framework:
+//    1. Market Regime → 2. Module Selection → 3. Risk Control
+//
+//  Regimes:  Strong Bull / Weak Bull / Ranging / Compression / Strong Bear / High Risk
+//  Modules:  Core Long / Breakout / Pullback / Mean Reversion
+//  Alerts:   Long/Short entry signals with score quality
+// ─────────────────────────────────────────────────────────────────────────────
+indicator(
+    "BTC Quant Strategy [Dual-Layer]",
+    overlay = true,
+    max_labels_count = 500,
+    max_lines_count = 500,
+    max_boxes_count = 500,
+    timeframe = "240"
+)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// -- EMA lengths --
+ema_fast1  = input.int(55,  "EMA Fast 1",  group = "EMAs")
+ema_fast2  = input.int(69,  "EMA Fast 2",  group = "EMAs")
+ema_slow1  = input.int(144, "EMA Slow 1",  group = "EMAs")
+ema_slow2  = input.int(169, "EMA Slow 2",  group = "EMAs")
+
+// -- MACD --
+macd_fast   = input.int(12, "MACD Fast",   group = "MACD")
+macd_slow   = input.int(26, "MACD Slow",   group = "MACD")
+macd_signal = input.int(9,  "MACD Signal", group = "MACD")
+
+// -- RSI / ADX / ATR --
+rsi_len  = input.int(14, "RSI Period",      group = "Oscillators")
+adx_len  = input.int(14, "ADX Period",      group = "Oscillators")
+atr_len  = input.int(14, "ATR Period",      group = "Oscillators")
+
+// -- Bollinger Bands --
+bb_len   = input.int(20, "BB Period",        group = "Bollinger")
+bb_mult  = input.float(2.0, "BB StdDev",     group = "Bollinger")
+
+// -- Donchian --
+dc_breakout = input.int(55, "DC Breakout",   group = "Donchian")
+dc_exit     = input.int(20, "DC Exit",       group = "Donchian")
+
+// -- Volume --
+vol_lookback = input.int(50, "Vol SMA Period", group = "Volume")
+
+// -- HTF EMAs (daily / weekly) --
+daily_ema_len  = input.int(169, "Daily EMA",   group = "HTF")
+weekly_ema_len = input.int(169, "Weekly EMA",  group = "HTF")
+
+// -- Regime thresholds --
+adx_ranging_max  = input.float(20, "ADX Ranging Max",  group = "Regime")
+bb_pct_compress  = input.float(25, "BB %ile Compress",  group = "Regime")
+atr_pct_compress = input.float(30, "ATR %ile Compress", group = "Regime")
+atr_pct_highrisk = input.float(90, "ATR %ile HighRisk", group = "Regime")
+regime_lookback  = input.int(120, "Regime Lookback",    group = "Regime")
+
+// -- Score thresholds --
+score_bo = input.int(55, "Breakout Score Min",  group = "Scores")
+score_pb = input.int(75, "Pullback Score Min",  group = "Scores")
+score_mr = input.int(75, "MeanRev Score Min",   group = "Scores")
+
+// -- Risk --
+risk_breakout  = input.float(0.65, "Breakout Risk %",  group = "Risk") / 100
+risk_pullback  = input.float(0.50, "Pullback Risk %",  group = "Risk") / 100
+risk_meanrev   = input.float(0.25, "MeanRev Risk %",   group = "Risk") / 100
+core_alloc     = input.float(0.40, "Core Allocation",  group = "Risk")
+
+// -- Display --
+show_emas      = input.bool(true, "Show EMAs",          group = "Display")
+show_dc        = input.bool(true, "Show Donchian",      group = "Display")
+show_bb        = input.bool(true, "Show Bollinger",     group = "Display")
+show_regime_bg = input.bool(true, "Show Regime BG",     group = "Display")
+show_signals   = input.bool(true, "Show Entry Signals", group = "Display")
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INDICATOR COMPUTATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// -- EMAs --
+ema55  = ta.ema(close, ema_fast1)
+ema69  = ta.ema(close, ema_fast2)
+ema144 = ta.ema(close, ema_slow1)
+ema169 = ta.ema(close, ema_slow2)
+
+// -- MACD --
+[macd_line, macd_sig, macd_hist] = ta.macd(close, macd_fast, macd_slow, macd_signal)
+
+// -- RSI --
+rsi = ta.rsi(close, rsi_len)
+
+// -- ADX --
+adx_val  = ta.adx(high, low, close, adx_len)
+plus_di  = ta.dmi(high, low, close, adx_len)[0]  // fallback: use adx directly
+adx_rising = adx_val > adx_val[1] and adx_val > adx_val[2]
+
+// -- ATR --
+atr_val = ta.atr(atr_len)
+
+// -- Bollinger Bands --
+bb_mid   = ta.sma(close, bb_len)
+bb_std   = ta.stdev(close, bb_len)
+bb_upper = bb_mid + bb_mult * bb_std
+bb_lower = bb_mid - bb_mult * bb_std
+bb_width = (bb_mult * bb_std) / bb_mid
+
+// -- Donchian Channels --
+dc55_high = ta.highest(high, dc_breakout)
+dc55_low  = ta.lowest(low, dc_breakout)
+dc20_high = ta.highest(high, dc_exit)
+dc20_low  = ta.lowest(low, dc_exit)
+
+// -- Volume --
+vol_sma = ta.sma(volume, vol_lookback)
+vol_std = ta.stdev(volume, vol_lookback)
+vol_z   = (volume - vol_sma) / math.max(vol_std, 1e-10)
+
+// -- HTF EMAs (daily / weekly resampled via request.security) --
+d_close  = request.security(syminfo.tickerid, "1D",   close, lookahead = barmerge.lookahead_off)
+w_close  = request.security(syminfo.tickerid, "1W",   close, lookahead = barmerge.lookahead_off)
+d_high   = request.security(syminfo.tickerid, "1D",   high,  lookahead = barmerge.lookahead_off)
+d_low    = request.security(syminfo.tickerid, "1D",   low,   lookahead = barmerge.lookahead_off)
+
+d_ema169 = request.security(syminfo.tickerid, "1D",   ta.ema(close, daily_ema_len),  lookahead = barmerge.lookahead_off)
+w_ema169 = request.security(syminfo.tickerid, "1W",   ta.ema(close, weekly_ema_len), lookahead = barmerge.lookahead_off)
+
+// HTF EMA direction
+d_ema_pct = (d_ema169 - d_ema169[1]) / math.max(d_ema169[1], 1e-10)
+d_ema_dir = d_ema_pct > 0.001 ? 1 : d_ema_pct < -0.001 ? -1 : 0
+w_ema_pct = (w_ema169 - w_ema169[1]) / math.max(w_ema169[1], 1e-10)
+w_ema_dir = w_ema_pct > 0.001 ? 1 : w_ema_pct < -0.001 ? -1 : 0
+
+// Daily swing high/low (5-day lookback)
+d_high_5d = request.security(syminfo.tickerid, "1D", ta.highest(high, 5), lookahead = barmerge.lookahead_off)
+d_low_5d  = request.security(syminfo.tickerid, "1D", ta.lowest(low, 5),   lookahead = barmerge.lookahead_off)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MARKET REGIME CLASSIFICATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ATR / Close percentile (rolling 120-bar rank)
+atr_ratio = atr_val / close
+atr_rank  = ta.percentrank(atr_ratio, regime_lookback)
+
+// BB width percentile
+bb_rank = ta.percentrank(bb_width, regime_lookback)
+
+// Large opposing candles
+body_size    = math.abs(close - open)
+large_body   = body_size > (2.0 * atr_val)
+bull_large   = large_body and close > open
+bear_large   = large_body and close < open
+bull_recent  = ta.rising(bull_large ? 1 : 0, 5) != 0
+bear_recent  = ta.rising(bear_large ? 1 : 0, 5) != 0
+opposing_big = bull_recent and bear_recent
+
+// Regime assignment (priority: HighRisk > Bull > Bear > Compression > Ranging)
+regime_highrisk   = atr_rank >= atr_pct_highrisk or opposing_big
+regime_bull       = (close > d_ema169) and (d_ema_dir > 0) and not regime_highrisk
+regime_bear       = (close < d_ema169) and (d_ema_dir < 0) and not regime_highrisk and not regime_bull
+regime_compression = (bb_rank <= bb_pct_compress) and (atr_rank <= atr_pct_compress) and (adx_val < adx_ranging_max) and not regime_highrisk and not regime_bull and not regime_bear
+
+regime = 0  // 0=Ranging, 1=Bull, 2=Bear, 3=Compression, 4=HighRisk
+regime := regime_highrisk   ? 4 : regime
+regime := regime_bull       ? 1 : regime
+regime := regime_bear       ? 2 : regime
+regime := regime_compression ? 3 : regime
+
+regime_name = switch regime
+    1 => "Strong Bull"
+    2 => "Strong Bear"
+    3 => "Compression"
+    4 => "High Risk"
+    => "Ranging"
+
+// Weak bull / bear (soft HTF context, not strict regime)
+weak_bull  = regime != 1 and d_ema_dir >= 0 and w_ema_dir >= 0
+weak_bear  = regime != 2 and d_ema_dir <= 0 and w_ema_dir <= 0
+strong_bull = regime == 1
+strong_bear = regime == 2
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ENTRY SIGNAL COMPUTATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// -- Pullback zone --
+ema_zone_low   = math.min(ema55, ema144)
+ema_zone_high  = math.max(ema55, ema144)
+ema_zone_low2  = math.min(ema69, ema169)
+ema_zone_high2 = math.max(ema69, ema169)
+in_pb_zone = (close >= ema_zone_low  and close <= ema_zone_high) or (
+             close >= ema_zone_low2 and close <= ema_zone_high2)
+
+// Pullback zone quality (0-15)
+zone_center = (ema55 + ema144) / 2
+zone_width  = math.max(math.abs(ema55 - ema144), 1e-10)
+zone_dist   = math.abs(close - zone_center) / zone_width
+zone_quality = (1.0 - math.min(zone_dist, 1.0)) * 15
+
+// -- RSI conditions --
+rsi_rising  = rsi > rsi[1]
+rsi_falling = rsi < rsi[1]
+rsi_oversold = rsi < 35
+rsi_overbought = rsi > 65
+
+// MACD histogram direction
+macd_hist_up   = macd_hist > macd_hist[1]
+macd_hist_up2  = macd_hist_up and macd_hist[1] > macd_hist[2]
+macd_hist_down = macd_hist < macd_hist[1]
+macd_hist_down2 = macd_hist_down and macd_hist[1] < macd_hist[2]
+
+// -- Price confirmation --
+break_prev_high = close > high[1]
+break_prev_low  = close < low[1]
+above_ema55 = close > ema55
+below_ema55 = close < ema55
+
+// -- Wick detection --
+candle_range  = math.max(high - low, 1e-10)
+lower_shadow  = (math.min(open, close) - low) / candle_range
+upper_shadow  = (high - math.max(open, close)) / candle_range
+has_lower_wick = lower_shadow > 0.35
+has_upper_wick = upper_shadow > 0.35
+
+// -- Donchian breakout --
+dc55_range       = dc55_high - dc55_low
+breakout_long    = close > dc55_high[1]  // shifted to avoid look-ahead
+breakout_short   = close < dc55_low[1]
+breakout_strength_l = math.min((close - dc55_high[1]) / math.max(dc55_range, 1e-10), 0.05) * 300
+breakout_strength_s = math.min((dc55_low[1] - close) / math.max(dc55_range, 1e-10), 0.05) * 300
+
+// -- Volume expansion --
+vol_expand = volume > vol_sma or vol_z > 0
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SCORING SYSTEM (simplified 0-100)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── 1. Market State Score (0-30) ──
+mk_score_l = 10.0  // base
+mk_score_s = 10.0
+
+if strong_bull
+    mk_score_l := 30.0
+    mk_score_s := 0.0
+else if strong_bear
+    mk_score_l := 0.0
+    mk_score_s := 30.0
+else if weak_bull
+    mk_score_l := 20.0
+    mk_score_s := 10.0
+else if weak_bear
+    mk_score_l := 10.0
+    mk_score_s := 20.0
+
+// ── 2. Pattern Score (0-30) ──
+
+// Breakout pattern
+vol_score    = math.min(vol_z, 3.0) * 3.33
+adx_pat      = math.min(math.max(adx_val - 20, 0), 25) / 25 * 5
+pat_bo_l     = math.min(breakout_strength_l, 15) + math.min(vol_score, 10) + math.min(adx_pat, 5)
+pat_bo_s     = math.min(breakout_strength_s, 15) + math.min(vol_score, 10) + math.min(adx_pat, 5)
+
+// Pullback pattern
+rsi_pb_l = (rsi >= 35 and rsi < 50) ? 15.0 : (rsi >= 30 and rsi < 55) ? 10.0 : 0.0
+rsi_pb_s = (rsi > 50 and rsi <= 65) ? 15.0 : (rsi > 45 and rsi <= 70) ? 10.0 : 0.0
+pat_pb_l = math.min(zone_quality + rsi_pb_l, 30)
+pat_pb_s = math.min(zone_quality + rsi_pb_s, 30)
+
+// Mean reversion pattern
+dist_lower  = math.max(close - bb_lower, 0) / math.max(bb_upper - bb_lower, 1e-10) * 100
+dist_upper  = math.max(bb_upper - close, 0) / math.max(bb_upper - bb_lower, 1e-10) * 100
+extreme_l   = math.max(15.0 - dist_lower * 3, 0)
+extreme_s   = math.max(15.0 - dist_upper * 3, 0)
+wick_l      = math.min(lower_shadow, 0.7) / 0.35 * 15 - 15
+wick_s      = math.min(upper_shadow, 0.7) / 0.35 * 15 - 15
+pat_mr_l    = math.min(extreme_l + wick_l, 30)
+pat_mr_s    = math.min(extreme_s + wick_s, 30)
+
+// ── 3. Momentum Score (0-20) ──
+macd_mom_l = macd_hist_up2 ? 7.0 : macd_hist_up ? 4.0 : 2.0
+macd_mom_s = macd_hist_down2 ? 7.0 : macd_hist_down ? 4.0 : 2.0
+rsi_mom_l  = rsi_rising and rsi < 50 ? 7.0 : rsi_rising ? 5.0 : 0.0
+rsi_mom_s  = rsi_falling and rsi > 50 ? 7.0 : rsi_falling ? 5.0 : 0.0
+adx_mom    = adx_rising and adx_val > 20 ? 3.0 : 0.0
+vol_mom    = math.min(vol_z, 2) / 2 * 3
+mom_l = math.min(macd_mom_l + rsi_mom_l + adx_mom + vol_mom, 20)
+mom_s = math.min(macd_mom_s + rsi_mom_s + adx_mom + vol_mom, 20)
+
+// ── 4. Risk Score (0-20) ──
+stop_dist   = (atr_val * 2) / close  // approx stop at 2x ATR
+stop_score  = stop_dist < 0.03 ? 10.0 : stop_dist < 0.05 ? 7.0 : stop_dist < 0.08 ? 4.0 : 0.0
+atr_mid     = atr_rank >= 30 and atr_rank <= 85 ? 5.0 : 0.0
+atr_good    = atr_rank >= 35 and atr_rank <= 70 ? 10.0 : atr_mid
+risk_score  = math.min(stop_score + atr_good, 20)
+
+// ── Total Scores ──
+score_breakout_long  = math.min(mk_score_l + pat_bo_l  + mom_l + risk_score, 100)
+score_breakout_short = math.min(mk_score_s + pat_bo_s  + mom_s + risk_score, 100)
+score_pullback_long  = math.min(mk_score_l + pat_pb_l  + mom_l + risk_score, 100)
+score_pullback_short = math.min(mk_score_s + pat_pb_s  + mom_s + risk_score, 100)
+score_meanrev_long   = math.min(mk_score_l + pat_mr_l  + mom_l + risk_score, 100)
+score_meanrev_short  = math.min(mk_score_s + pat_mr_s  + mom_s + risk_score, 100)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DECISION FRAMEWORK — REGIME-GATED SIGNAL SELECTION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// -- Core Long --
+core_entry = regime == 1  // Strong Bull only
+core_exit  = w_ema_dir < 0
+
+// -- Tactical: priority-ordered signal per regime --
+//   Strong Bull (1)  → BO long + PB long; NO shorts
+//   Weak Bull        → BO/PB long; half size
+//   Ranging (0)      → MR only; no BO/PB
+//   Compression (3)  → BO long
+//   Strong Bear (2)  → BO short + PB short; NO longs
+//   High Risk (4)    → none
+
+signal_long   = false
+signal_short  = false
+signal_module = "none"
+signal_score  = 0.0
+
+// Strong Bull
+if strong_bull
+    if score_breakout_long >= score_bo
+        signal_long := true
+        signal_module := "breakout"
+        signal_score := score_breakout_long
+    else if score_pullback_long >= score_pb
+        signal_long := true
+        signal_module := "pullback"
+        signal_score := score_pullback_long
+    else if score_meanrev_long >= score_mr
+        signal_long := true
+        signal_module := "meanrev"
+        signal_score := score_meanrev_long
+
+// Strong Bear
+if strong_bear
+    if score_breakout_short >= score_bo
+        signal_short := true
+        signal_module := "breakout"
+        signal_score := score_breakout_short
+    else if score_pullback_short >= score_pb
+        signal_short := true
+        signal_module := "pullback"
+        signal_score := score_pullback_short
+    else if score_meanrev_short >= score_mr
+        signal_short := true
+        signal_module := "meanrev"
+        signal_score := score_meanrev_short
+
+// Ranging: mean-rev only
+if regime == 0
+    if score_meanrev_long >= score_mr
+        signal_long := true
+        signal_module := "meanrev"
+        signal_score := score_meanrev_long
+    else if score_meanrev_short >= score_mr
+        signal_short := true
+        signal_module := "meanrev"
+        signal_score := score_meanrev_short
+
+// Compression: breakout long
+if regime == 3
+    if score_breakout_long >= score_bo
+        signal_long := true
+        signal_module := "breakout"
+        signal_score := score_breakout_long
+
+// Weak Bull / Transition: BO/PB long, half size
+if weak_bull and not signal_long and not signal_short
+    if score_breakout_long >= score_bo
+        signal_long := true
+        signal_module := "breakout_wb"
+        signal_score := score_breakout_long
+    else if score_pullback_long >= score_pb
+        signal_long := true
+        signal_module := "pullback_wb"
+        signal_score := score_pullback_long
+    else if score_meanrev_long >= score_mr
+        signal_long := true
+        signal_module := "meanrev_wb"
+        signal_score := score_meanrev_long
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EXIT CONDITIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Donchian exit (breakout module)
+dc_exit_long  = close < dc20_low
+dc_exit_short = close > dc20_high
+
+// EMA exit (breakout: 2-bar close below EMA144)
+ema_exit_long  = close < ema144 and close[1] < ema144[1]
+ema_exit_short = close > ema144 and close[1] > ema144[1]
+
+// Trailing stop (approximate ATR-based)
+atr_trail_long  = ta.highest(high, 20) - 2.5 * atr_val
+atr_trail_short = ta.lowest(low, 20)   + 2.5 * atr_val
+trail_exit_long  = close < atr_trail_long
+trail_exit_short = close > atr_trail_short
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ALERT CONDITIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+alert_long  = signal_long  and not signal_long[1]
+alert_short = signal_short and not signal_short[1]
+alert_core  = core_entry   and not core_entry[1]
+alert_exit  = (core_exit or dc_exit_long or ema_exit_long or trail_exit_long) and
+              not (core_exit[1] or dc_exit_long[1] or ema_exit_long[1] or trail_exit_long[1])
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PLOTTING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// -- Regime background --
+bg_color = switch regime
+    1 => color.new(#00ff00, 92)  // Bull → faint green
+    2 => color.new(#ff0000, 92)  // Bear → faint red
+    3 => color.new(#ffff00, 92)  // Compression → faint yellow
+    4 => color.new(#ff00ff, 90)  // HighRisk → faint magenta
+    => na
+
+bgcolor(show_regime_bg ? bg_color : na, title = "Regime Background")
+
+// -- EMAs --
+plot(show_emas ? ema55  : na, "EMA55",  color.blue,  1)
+plot(show_emas ? ema69  : na, "EMA69",  color.blue,  1, plot.style_dashed)
+plot(show_emas ? ema144 : na, "EMA144", color.red,   1)
+plot(show_emas ? ema169 : na, "EMA169", color.red,   1, plot.style_dashed)
+
+// -- Donchian Channels --
+dc55_high_plot = plot(show_dc ? dc55_high : na, "DC55 High", color.new(#00ff00, 70), 1)
+dc55_low_plot  = plot(show_dc ? dc55_low  : na, "DC55 Low",  color.new(#ff0000, 70), 1)
+fill(dc55_high_plot, dc55_low_plot, color.new(#888888, 95), "DC55 Fill")
+
+// -- Bollinger Bands --
+plot(show_bb ? bb_upper : na, "BB Upper", color.new(#ffaa00, 60), 1)
+plot(show_bb ? bb_mid   : na, "BB Mid",   color.new(#ffaa00, 80), 1, plot.style_dashed)
+plot(show_bb ? bb_lower : na, "BB Lower", color.new(#ffaa00, 60), 1)
+
+// -- Entry signals --
+plotshape(
+    show_signals and alert_long, "LONG Signal",
+    shape.triangleup, location.belowbar,
+    signal_module == "breakout" ? color.green :
+    signal_module == "pullback" ? color.blue :
+    signal_module == "meanrev"   ? color.teal : color.gray,
+    size = size.small
+)
+
+plotshape(
+    show_signals and alert_short, "SHORT Signal",
+    shape.triangledown, location.abovebar,
+    signal_module == "breakout" ? color.red :
+    signal_module == "pullback" ? color.orange :
+    signal_module == "meanrev"   ? color.maroon : color.gray,
+    size = size.small
+)
+
+plotshape(
+    show_signals and alert_core, "CORE Entry",
+    shape.diamond, location.belowbar,
+    color.yellow, size = size.tiny
+)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INFO TABLE (right side)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var table info_tbl = table.new(position.top_right, 3, 8,
+    border_width = 1, border_color = color.gray, frame_width = 1)
+
+if barstate.islast
+    // Row 0: Regime
+    table.cell(info_tbl, 0, 0, "REGIME",    text_color = color.gray)
+    table.cell(info_tbl, 1, 0, regime_name,
+        text_color = regime == 1 ? color.green : regime == 2 ? color.red : color.yellow)
+    table.cell(info_tbl, 2, 0, "r=" + str.tostring(regime), text_color = color.gray)
+
+    // Row 1: Scores
+    table.cell(info_tbl, 0, 1, "BO L/S",  text_color = color.gray)
+    table.cell(info_tbl, 1, 1, str.tostring(math.round(score_breakout_long, 0)),
+        text_color = score_breakout_long >= score_bo ? color.green : color.gray)
+    table.cell(info_tbl, 2, 1, str.tostring(math.round(score_breakout_short, 0)),
+        text_color = score_breakout_short >= score_bo ? color.red : color.gray)
+
+    // Row 2: Pullback scores
+    table.cell(info_tbl, 0, 2, "PB L/S",  text_color = color.gray)
+    table.cell(info_tbl, 1, 2, str.tostring(math.round(score_pullback_long, 0)),
+        text_color = score_pullback_long >= score_pb ? color.green : color.gray)
+    table.cell(info_tbl, 2, 2, str.tostring(math.round(score_pullback_short, 0)),
+        text_color = score_pullback_short >= score_pb ? color.red : color.gray)
+
+    // Row 3: MeanRev scores
+    table.cell(info_tbl, 0, 3, "MR L/S",  text_color = color.gray)
+    table.cell(info_tbl, 1, 3, str.tostring(math.round(score_meanrev_long, 0)),
+        text_color = score_meanrev_long >= score_mr ? color.green : color.gray)
+    table.cell(info_tbl, 2, 3, str.tostring(math.round(score_meanrev_short, 0)),
+        text_color = score_meanrev_short >= score_mr ? color.red : color.gray)
+
+    // Row 4: ADX / ATR
+    table.cell(info_tbl, 0, 4, "ADX",   text_color = color.gray)
+    table.cell(info_tbl, 1, 4, str.tostring(math.round(adx_val, 1)),
+        text_color = adx_val > 20 ? color.blue : color.gray)
+    table.cell(info_tbl, 2, 4, "ATR " + str.tostring(math.round(atr_val, 0)),
+        text_color = color.gray)
+
+    // Row 5: RSI
+    table.cell(info_tbl, 0, 5, "RSI",   text_color = color.gray)
+    rsi_color = rsi > 65 ? color.red : rsi < 35 ? color.green : color.gray
+    table.cell(info_tbl, 1, 5, str.tostring(math.round(rsi, 1)), text_color = rsi_color)
+
+    // Row 6: Signal
+    table.cell(info_tbl, 0, 6, "SIGNAL", text_color = color.gray)
+    sig_color = signal_long ? color.green : signal_short ? color.red : color.gray
+    table.cell(info_tbl, 1, 6, signal_long ? "LONG" : signal_short ? "SHORT" : "NONE",
+        text_color = sig_color)
+    table.cell(info_tbl, 2, 6, signal_module + " " + str.tostring(math.round(signal_score, 0)),
+        text_color = sig_color)
+
+    // Row 7: Core
+    table.cell(info_tbl, 0, 7, "CORE", text_color = color.gray)
+    table.cell(info_tbl, 1, 7, core_entry ? "ENTRY" : core_exit ? "EXIT" : "HOLD",
+        text_color = core_entry ? color.green : core_exit ? color.red : color.gray)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ALERT MESSAGES (copy these into TradingView alert conditions)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// === LONG SIGNAL ===
+// Condition: alert_long
+// Message:
+//   {{ticker}} {{interval}} LONG {{strategy.order.action}}
+//   Regime: {{plot("Regime")}} | Module: signal_module | Score: signal_score
+//   Price: {{close}} | ATR: {{plot("ATR")}} | ADX: {{plot("ADX")}}
+//   SL: 2x ATR below entry | TP1: partial at 1.5R | Trail: 3x ATR
+
+// === SHORT SIGNAL ===
+// Condition: alert_short
+// Message:
+//   {{ticker}} {{interval}} SHORT {{strategy.order.action}}
+//   Regime: {{plot("Regime")}} | Module: signal_module | Score: signal_score
+//   Price: {{close}} | ATR: {{plot("ATR")}} | ADX: {{plot("ADX")}}
+
+// === CORE ENTRY ===
+// Condition: alert_core
+// Message:
+//   {{ticker}} CORE LONG ENTRY | Strong Bull confirmed
+//   Price: {{close}} | Daily EMA169: {{plot("Daily EMA169")}}
+
+// === EXIT ===
+// Condition: alert_exit
+// Message:
+//   {{ticker}} EXIT SIGNAL | Regime: {{plot("Regime")}}
+//   Close: {{close}} | EMA144: {{plot("EMA144")}}
