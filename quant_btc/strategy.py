@@ -235,6 +235,7 @@ def prepare_features(df: pd.DataFrame, cfg: BacktestConfig) -> pd.DataFrame:
     lower_shadow = (np.minimum(out["Open"], out["Close"]) - out["Low"]) / candle_range
     upper_shadow = (out["High"] - np.maximum(out["Open"], out["Close"])) / candle_range
     has_lower_wick = lower_shadow > 0.35
+    out["_upper_shadow"] = upper_shadow
     has_upper_wick = upper_shadow > 0.35
 
     # Low ADX for ranging (relaxed threshold for BTC)
@@ -431,13 +432,296 @@ def _add_score_columns(df: pd.DataFrame):
 
     risk_score = (stop_score + atr_risk_score).clip(0, 20)
 
-    # ── Combine ──
+    # ── Combine: long scores (30/30/20/20) ──
     df["score_breakout_long"] = (mk_long + pat_breakout_l + mom_l + risk_score).clip(0, 100)
-    df["score_breakout_short"] = (mk_short + pat_breakout_s + mom_s + risk_score).clip(0, 100)
     df["score_pullback_long"] = (mk_long + pat_pullback_l + mom_l + risk_score).clip(0, 100)
-    df["score_pullback_short"] = (mk_short + pat_pullback_s + mom_s + risk_score).clip(0, 100)
     df["score_meanrev_long"] = (mk_long + pat_meanrev_l + mom_l + risk_score).clip(0, 100)
-    df["score_meanrev_short"] = (mk_short + pat_meanrev_s + mom_s + risk_score).clip(0, 100)
+
+    # ── Short scores: asymmetric weights (35/30/15/10) + deriv (10, added later) ──
+    # Bear context dominates, momentum de-weighted, risk tighter.
+    _ss = lambda mk, pat, mom, risk: (
+        mk * 35 / 30 + pat + mom * 0.75 + risk * 0.5
+    ).clip(0, 100)
+
+    df["score_breakout_short"] = _ss(mk_short, pat_breakout_s, mom_s, risk_score)
+    df["score_pullback_short"] = _ss(mk_short, pat_pullback_s, mom_s, risk_score)
+    df["score_meanrev_short"] = _ss(mk_short, pat_meanrev_s, mom_s, risk_score)
+
+    # ── Crash Breakdown Short (upgraded breakout short) ──
+    # DMI: +DI / -DI
+    _tr = pd.concat([df["High"] - df["Low"],
+                     (df["High"] - df["Close"].shift(1)).abs(),
+                     (df["Low"] - df["Close"].shift(1)).abs()], axis=1).max(axis=1)
+    _atr_di = _tr.ewm(span=14, adjust=False, min_periods=1).mean()
+    _up = df["High"].diff()
+    _down = -df["Low"].diff()
+    _plus_dm = pd.Series(np.where((_up > _down) & (_up > 0), _up, 0.0), index=df.index)
+    _minus_dm = pd.Series(np.where((_down > _up) & (_down > 0), _down, 0.0), index=df.index)
+    _plus_di = 100 * _plus_dm.ewm(span=14, adjust=False, min_periods=1).mean() / _atr_di
+    _minus_di = 100 * _minus_dm.ewm(span=14, adjust=False, min_periods=1).mean() / _atr_di
+    df["_plus_di"] = _plus_di
+    df["_minus_di"] = _minus_di
+
+    # Close position in bar (0=low, 1=high)
+    bar_range = (df["High"] - df["Low"]).clip(1e-10)
+    close_pos = (close - df["Low"]) / bar_range
+    close_near_low = close_pos < 0.35
+
+    # Late chase: RSI < 28 OR 3+ consecutive lower closes
+    three_down = (close < close.shift(1)) & (close.shift(1) < close.shift(2)) & (close.shift(2) < close.shift(3))
+    late_chase = (rsi < 28) | three_down
+
+    # Crash breakdown pattern score (0-30)
+    di_ratio = (_minus_di / _plus_di.clip(1e-10)).clip(0, 5)
+    di_score = (di_ratio - 1.0).clip(0, 2) * 4  # -DI > +DI → up to 8 pts
+    close_pos_score = (1.0 - close_pos).clip(0, 0.65) / 0.65 * 8  # closer to low = better, up to 8 pts
+    vol_crash_score = vol_z.clip(0.8, 3) / 3 * 8  # high vol, up to 8 pts
+    adx_crash_score = (adx.clip(22, 40) - 22) / 18 * 6  # ADX strength, up to 6 pts
+    pat_crash = (di_score + close_pos_score + vol_crash_score + adx_crash_score).clip(0, 30)
+
+    # Crash momentum (0-20): ADX rising + -DI dominance
+    adx_crash_rising = adx_rising & (adx > 22)
+    crash_mom = pd.Series(0.0, index=df.index)
+    crash_mom[adx_crash_rising] += 10
+    crash_mom[_minus_di > _plus_di] += 7
+    crash_mom[vol_z > 0.8] += 3
+    crash_mom = crash_mom.clip(0, 20)
+
+    # Crash risk (0-20)
+    crash_risk = risk_score.copy()
+    crash_risk[late_chase] = 0  # late chase → no risk score
+    crash_risk[close_pos >= 0.35] *= 0.5  # weak close → half risk score
+
+    df["score_crash_short"] = _ss(mk_short, pat_crash, crash_mom, crash_risk)
+
+    # Late chase flag for master filter reference
+    df["_late_chase"] = late_chase
+
+    # ── Failed Bounce Short (upgraded pullback short, Step 4) ──
+    # Price rebound to resistance
+    _bb_mid = (df["bb_upper"] + df["bb_lower"]) / 2
+    rebound_bb = close >= _bb_mid
+    rebound_ema = (close >= df["ema55"] * 0.995) & (close <= df["ema144"] * 1.01)
+    rebound_zone = df["in_pullback_zone"]  # price between EMA55-144 or EMA69-169
+    price_at_resistance = rebound_zone | rebound_bb | rebound_ema
+
+    # RSI rejection: was 48-62, now falling
+    rsi_reject = (
+        (rsi.shift(1) >= 48) & (rsi.shift(1) <= 62) & (rsi < rsi.shift(1))
+    )
+
+    # MACD histogram turning down (was rising/stable, now falling)
+    macd_turn = (macd_h < macd_h.shift(1)) & (macd_h.shift(1) >= macd_h.shift(2))
+
+    # Upper wick
+    _u_shadow = df["_upper_shadow"]
+    upper_wick = _u_shadow > 0.35
+
+    # Close breaks previous low
+    break_low = close < df["Low"].shift(1)
+
+    # Failed bounce pattern score (0-30)
+    fb_pattern = pd.Series(0.0, index=df.index)
+    fb_pattern[price_at_resistance] += 10  # at resistance zone
+    fb_pattern[rsi_reject] += 8             # RSI rejection
+    fb_pattern[macd_turn] += 5              # MACD turning
+    fb_pattern[upper_wick] += 4             # wick confirmation
+    fb_pattern[break_low] += 3              # breaks previous low
+    fb_pattern = fb_pattern.clip(0, 30)
+
+    # Failed bounce momentum (0-20): RSI rejection + MACD turn
+    fb_mom = pd.Series(0.0, index=df.index)
+    fb_mom[rsi_reject] += 10
+    fb_mom[macd_turn] += 7
+    fb_mom[adx_rising & (adx > 20)] += 3
+    fb_mom = fb_mom.clip(0, 20)
+
+    df["score_failed_bounce_short"] = (mk_short + fb_pattern + fb_mom + risk_score).clip(0, 100)
+
+    # Failed bounce gate: MUST be at resistance + break low, PLUS >=1 momentum
+    fb_must = price_at_resistance & break_low  # structural must-haves
+    fb_momentum = (rsi_reject.astype(int) + macd_turn.astype(int) + upper_wick.astype(int)) >= 1
+    df["_failed_bounce_gate"] = fb_must & fb_momentum
+
+    # ── Bull Trap Short (Step 5) ──
+    # Price breaks above significant resistance, then reverses sharply.
+    # Must NOT be in Strong Bull.  Uses DC55 + BB upper as resistance.
+    dc55_high_prev = df["roll_high_55"].shift(1)
+    bb_upper_val = df["bb_upper"]
+    trap_resistance = np.maximum(dc55_high_prev, bb_upper_val)
+    # Breakout bar: high penetrated resistance
+    broke_above = df["High"].shift(1) > trap_resistance.shift(1)
+    # Trap bar: close back BELOW resistance by > 0.3× ATR (significant reversal)
+    trap_confirmed = broke_above & ((trap_resistance - close) > 0.3 * atr)
+    # Upper wick on trap bar
+    trap_wick = _u_shadow > 0.35
+    # Close in lower half of bar
+    trap_close_low = close_pos < 0.50
+    # Volume on breakout bar was above average
+    trap_vol = vol_z.shift(1) > 0.5
+
+    # Bull trap pattern score (0-30)
+    trap_strength = ((df["High"].shift(1) - trap_resistance) / atr).clip(0, 2) / 2 * 10  # how far above resistance
+    trap_confirm_score = ((trap_resistance - close) / atr).clip(0, 2) / 2 * 8  # how far back below
+    trap_wick_score = _u_shadow.clip(0.3, 0.7) / 0.4 * 7  # rejection wick
+    trap_close_score = (0.4 - close_pos).clip(0, 0.3) / 0.3 * 5  # closed near low
+    trap_pattern = (trap_strength + trap_confirm_score + trap_wick_score + trap_close_score).clip(0, 30)
+    trap_pattern[~trap_confirmed] = 0
+
+    # Bull trap momentum (0-20)
+    trap_mom = pd.Series(0.0, index=df.index)
+    trap_mom[trap_confirmed & trap_wick] += 8
+    trap_mom[trap_confirmed & trap_close_low] += 7
+    trap_mom[trap_confirmed & trap_vol] += 5
+    trap_mom = trap_mom.clip(0, 20)
+
+    df["score_bull_trap_short"] = _ss(mk_short, trap_pattern, trap_mom, risk_score)
+    df["_bull_trap_signal"] = trap_confirmed & trap_wick & trap_close_low & trap_vol  # strict gate
+
+    # ── Price Action: Swing Structure + Fibonacci (Step 10) ──
+    _compute_price_action_bonus(df)
+
+    # ── Derivative Bonus placeholder ──
+    df["_short_deriv_bonus"] = 0.0
+
+
+def _compute_price_action_bonus(df: pd.DataFrame):
+    """Add swing structure + Fibonacci columns for short quality bonus."""
+    close = df["Close"]
+    high = df["High"]
+    low = df["Low"]
+    atr = df["_atr_signal"]
+
+    # ── Fractal Pivots (confirmed 2 bars after) ──
+    pivot_high = (
+        (high.shift(4) < high.shift(3)) & (high.shift(3) < high.shift(2))
+        & (high.shift(2) > high.shift(1)) & (high.shift(1) > high)
+    )
+    pivot_low = (
+        (low.shift(4) > low.shift(3)) & (low.shift(3) > low.shift(2))
+        & (low.shift(2) < low.shift(1)) & (low.shift(1) < low)
+    )
+
+    # Pivot values (at the pivot bar, shifted 2 for confirmation lag)
+    ph_val = pd.Series(np.where(pivot_high, high.shift(2), np.nan), index=df.index)
+    pl_val = pd.Series(np.where(pivot_low, low.shift(2), np.nan), index=df.index)
+
+    # Forward-fill to get most recent pivot
+    last_ph = ph_val.ffill()
+    last_pl = pl_val.ffill()
+
+    # Previous distinct pivot: detect when ffill changes (new pivot), capture previous value
+    new_ph = last_ph.diff().abs() > 1e-8
+    new_pl = last_pl.diff().abs() > 1e-8
+    prev_ph = last_ph.shift(1).where(new_ph).ffill()
+    prev_pl = last_pl.shift(1).where(new_pl).ffill()
+
+    # Structure detection
+    lower_high = new_ph & (last_ph < prev_ph) & prev_ph.notna()
+    lower_low = new_pl & (last_pl < prev_pl) & prev_pl.notna()
+    # Bear structure: recent lower high AND lower low confirmed
+    bear_struct_event = lower_high | lower_low
+    df["_bear_structure"] = bear_struct_event.rolling(50, min_periods=1).max().astype(bool)
+
+    # ── Fibonacci Failed Rally ──
+    swing_range = last_ph - last_pl
+    fib_382 = last_pl + 0.382 * swing_range
+    fib_500 = last_pl + 0.500 * swing_range
+    fib_618 = last_pl + 0.618 * swing_range
+
+    in_fib_zone = (close >= fib_382) & (close <= fib_618) & (swing_range > atr * 0.5)
+    _upper_shadow_col = df["_upper_shadow"]
+    has_rejection = (_upper_shadow_col > 0.35) | (close < low.shift(1))
+    fib_failed = in_fib_zone & has_rejection & df["_bear_structure"]
+    df["_fib_failed_rally"] = fib_failed
+
+    # ── Bonus: bear structure +5, fib failed rally +5 more ──
+    bonus = pd.Series(0.0, index=df.index)
+    bonus[df["_bear_structure"]] += 0
+    bonus[fib_failed] += 10
+    df["_price_action_bonus"] = bonus.clip(0, 10)
+
+    # ── Double Top / Top Exhaustion Detection ──
+    # Track last 3 pivot highs with their prices, RSI, MACD hist
+    ph_mask = pivot_high
+    ph_price = pd.Series(np.where(ph_mask, high.shift(2), np.nan), index=df.index)
+    ph_rsi = pd.Series(np.where(ph_mask, df["rsi_14"].shift(2), np.nan), index=df.index)
+    ph_macd = pd.Series(np.where(ph_mask, df["macd_hist"].shift(2), np.nan), index=df.index)
+
+    # Get last 2 pivot highs (forward-filled)
+    ph1_price = ph_price.ffill()  # most recent pivot high
+    ph2_price = ph_price.where(ph_mask).shift(1).ffill()  # previous pivot high
+    ph1_rsi = ph_rsi.ffill()
+    ph2_rsi = ph_rsi.where(ph_mask).shift(1).ffill()
+    ph1_macd = ph_macd.ffill()
+    ph2_macd = ph_macd.where(ph_mask).shift(1).ffill()
+
+    # Double top: two pivot highs within 3% of each other
+    double_top = (
+        (ph2_price > 0) & (ph1_price > 0)
+        & (abs(ph1_price / ph2_price - 1) < 0.03)
+        & (ph1_rsi < ph2_rsi)  # RSI divergence
+        & (ph1_macd < ph2_macd)  # MACD divergence
+    )
+    # Neckline: lowest low between the two tops
+    neckline_low = last_pl.ffill()  # most recent pivot low between the tops
+    neckline_break = close < neckline_low
+
+    # Top exhaustion score (0-100)
+    top_score = pd.Series(0.0, index=df.index)
+    top_score[double_top] += 25  # double/triple top structure
+    top_score[double_top & (ph1_rsi < ph2_rsi - 3)] += 20  # RSI/MACD divergence
+    top_score[double_top] += 15  # second top weakness (RSI already checked above)
+    top_score[double_top & neckline_break] += 25  # neckline break
+    top_score[double_top] += 15  # funding/OI (handled by deriv bonus separately)
+    df["_top_exhaustion_score"] = top_score.clip(0, 100)
+    df["_double_top_signal"] = double_top & neckline_break
+
+    # Bull Guard: structural bull market → block shorts
+    _d_ema = df["d_ema"]
+    _d_ema_dir_pa = pd.Series(
+        np.where(_d_ema.pct_change(1).fillna(0) > 0.001, 1,
+                 np.where(_d_ema.pct_change(1).fillna(0) < -0.001, -1, 0)),
+        index=df.index,
+    )
+    df["_bull_guard"] = (_d_ema_dir_pa > 0) & (close > _d_ema)
+
+
+def compute_derivative_bonus(df: pd.DataFrame, deriv_df: pd.DataFrame | None) -> pd.Series:
+    """Return derivative bonus Series (0-20) aligned to df.index.
+
+    Call AFTER prepare_features().dropna() so NaN in derivative data
+    doesn't drop valid signal rows.
+    """
+    bonus = pd.Series(0.0, index=df.index)
+
+    if deriv_df is None or deriv_df.empty:
+        return bonus
+
+    # Align derivative data to feature DataFrame index
+    fr = deriv_df["funding_rate"].reindex(df.index, method="ffill") if "funding_rate" in deriv_df.columns else pd.Series(0.0, index=df.index)
+    oi = deriv_df["open_interest"].reindex(df.index, method="ffill") if "open_interest" in deriv_df.columns else pd.Series(0.0, index=df.index)
+    close = df["Close"]
+
+    # Funding rate z-score (90-period, min 30 bars for stability)
+    fr_sma = fr.rolling(90, min_periods=30).mean()
+    fr_std = fr.rolling(90, min_periods=30).std()
+    funding_z = ((fr - fr_sma) / fr_std.clip(1e-10)).fillna(0)
+
+    # 24h changes (6 × 4h bars)
+    oi_change = oi.pct_change(6).fillna(0)
+    price_change = close.pct_change(6).fillna(0)
+
+    # Crowded longs: high funding + OI rising + price stalled
+    crowded = (funding_z > 1.5) & (oi_change > 0.05) & (price_change < 0.02)
+
+    # Deleveraging: price < DC20 low (shifted) + OI dropping fast
+    dc20_low = close.rolling(20, min_periods=1).min()
+    delever = (close < dc20_low.shift(1)) & (oi_change < -0.03)
+
+    bonus[crowded] += 10
+    bonus[delever] += 10
+    return bonus.clip(0, 20)
 
 
 # ═══════════════════ Risk feature helpers (called from Strategy.init) ═══════════════════
@@ -639,6 +923,11 @@ class BaseRiskStrategy(Strategy):
         bb_sd = df["Close"].rolling(20, min_periods=1).std()
         df["bb_upper"] = bb_sma + 2 * bb_sd
         df["bb_lower"] = bb_sma - 2 * bb_sd
+
+        # Daily swing low 20 (for bear core entry)
+        d_low = df["Low"].resample("1D").min()
+        d_swing_low_20 = d_low.rolling(20, min_periods=1).min().shift(1)
+        df["_daily_swing_low_20"] = d_swing_low_20.reindex(idx, method="ffill")
 
         # -- State tracking --
         self._had_position = False
@@ -1121,7 +1410,10 @@ class BreakoutStrategy(ATRHTFStopStrategy):
         atr = self._at("_atr")
         d_high = self._at("_d_high")
         d_low = self._at("_d_low")
-        sl_mult = self.risk_cfg.breakout_sl_atr_mult
+        sl_mult = (
+            self.risk_cfg.short_sl_atr_mult if not is_long
+            else self.risk_cfg.breakout_sl_atr_mult
+        )
 
         if is_long:
             sl = max(entry - sl_mult * atr, d_low)
@@ -1251,9 +1543,11 @@ class DualLayerStrategy(BaseRiskStrategy):
     tactical exits don't disturb the core.
     """
 
-    _USE_FIXED_TP = False  # tactical uses manual SL/TP check
+    _USE_FIXED_TP = False
     _BREAKOUT_MODE = False
     _MIN_RR = 2.0
+    _USE_TIME_STOP = True  # shorts use aggressive time stops
+    _USE_PARTIAL_TP = True  # shorts use module-specific partial TP
 
     def init(self):
         super().init()
@@ -1267,6 +1561,7 @@ class DualLayerStrategy(BaseRiskStrategy):
 
         # Tactical tracking
         self._tac_direction = 0  # 1=long, -1=short, 0=none
+        self._tac_module = ""  # 'breakout', 'pullback', 'crash', 'bull_trap', etc.
         self._tac_entry_price = 0.0
         self._tac_sl = 0.0
         self._tac_tp = 0.0
@@ -1276,6 +1571,23 @@ class DualLayerStrategy(BaseRiskStrategy):
         # Daily close tracking for core exit
         self._days_below_dema = 0
         self._last_day = -1
+
+        # Bear core tracking
+        self._bear_core_active = False
+        self._bear_core_stage = 0  # 0=none, 1=probe, 2=confirm, 3=accel, 99=event_runner
+        self._bear_core_size = 0.0
+        self._bear_core_entry_price = 0.0
+        self._bear_core_highest_daily_high = 0.0
+        self._days_above_dema = 0
+        self._waterfall_triggered = False
+        self._waterfall_lock_r = 0.0
+        # Bear group risk tracking
+        self._bear_group_id = 0  # incremented per structure
+        self._bear_group_exposure = 0.0
+        self._bear_group_entry_bar = -10**9
+        self._bear_group_peak_r = 0.0
+        self._bear_group_max_exposure = 0.50
+        self._bear_group_max_loss_pct = 0.006
 
     # ── Core helpers ──
 
@@ -1320,6 +1632,106 @@ class DualLayerStrategy(BaseRiskStrategy):
         """Add to core on pullback long signal."""
         return bool(self.data.df["pullback_long"].iloc[self._bar_index()])
 
+    # ── Bear core helpers ──
+
+    def _bear_core_probe_signal(self) -> bool:
+        """Bear core probe: daily bearish + below 20-day swing low."""
+        d_dir = self._at("_d_ema_dir")
+        d_ema = self._at("_d_ema_169")
+        sw_low = self._at("_daily_swing_low_20")
+        return (
+            not self._core_active
+            and not self._bear_core_active
+            and self._at("Close") < d_ema
+            and d_dir < 0
+            and self._at("Close") < sw_low
+        )
+
+    def _bear_core_confirm_signal(self) -> bool:
+        """Bear core confirm: probe active + weekly also bearish."""
+        if not self._bear_core_probe:
+            return False
+        d_dir = self._at("_d_ema_dir")
+        d_ema = self._at("_d_ema_169")
+        w_ema = self._at("_w_ema_169")
+        w_dir = self._at("_w_ema_dir")
+        return (
+            self._at("Close") < d_ema
+            and d_dir < 0
+            and self._at("Close") < w_ema
+            and w_dir <= 0
+        )
+
+    def _check_waterfall_profit_guard(self) -> bool:
+        """Detect event-driven crash: large profit in few bars without bear trend.
+        Uses 4H ATR for R-computation (waterfall is a 4H event, not daily)."""
+        if getattr(self, '_bear_core_stage', 0) not in (1, 2):
+            return False
+        entry = self._bear_core_entry_price
+        bar_low = self._at("Low")
+        atr_4h = self._at("_atr")
+        if atr_4h <= 0 or entry <= 0:
+            return False
+        # Use 2.5× 4H ATR as the "R" unit for event detection
+        risk_4h = 2.5 * atr_4h
+        current_r = (entry - bar_low) / risk_4h
+        bars = self._bar_index() - getattr(self, '_bear_core_entry_bar', -10**9)
+        d_dir = self._at("_d_ema_dir")
+
+        # Condition 1: ≤6 bars, ≥3R (4H), daily NOT bearish → event crash
+        if bars <= 6 and current_r >= 1.5 and d_dir >= 0:
+            self._close_portion(0.70)
+            self._waterfall_lock_r = 1.5
+            self._bear_core_stage = 99
+            return True
+
+        # Condition 2: ≤10 bars, ≥4R (4H) → regardless of trend
+        if bars <= 10 and current_r >= 2.5:
+            self._close_portion(0.80)
+            self._waterfall_lock_r = 2.0
+            self._bear_core_stage = 99
+            return True
+
+        return False
+
+    def _bear_core_sl(self) -> float:
+        """Bear core SL: 2.5× daily ATR above entry, capped by recent daily high."""
+        daily_atr = self._at("_atr") * 1.5  # approximate daily ATR from 4H
+        sl = self._bear_core_entry_price + self.risk_cfg.bear_core_sl_daily_atr * daily_atr
+        return sl
+
+    def _bear_core_exit_signal(self) -> bool:
+        """Bear core exit: trend reversal or trailing stop."""
+        if not self._bear_core_active:
+            return False
+        rcfg = self.risk_cfg
+        d_dir = self._at("_d_ema_dir")
+        d_ema = self._at("_d_ema_169")
+
+        # Daily EMA direction turns positive
+        if d_dir > 0:
+            return True
+
+        # 2 daily closes above daily EMA169
+        day = self._day_id()
+        if day != self._last_day:
+            self._last_day = day
+            if self._at("Close") > d_ema:
+                self._days_above_dema += 1
+            else:
+                self._days_above_dema = 0
+        if self._days_above_dema >= rcfg.bear_core_exit_days_above_ema:
+            return True
+
+        # Daily ATR trailing stop (price rises above trailing level)
+        if self._bear_core_entry_price > 0:
+            daily_atr = self._at("_atr") * 1.5  # approximate daily ATR
+            trail_level = self._bear_core_entry_price + rcfg.bear_core_sl_daily_atr * daily_atr
+            if self._at("Close") > trail_level:
+                return True
+
+        return False
+
     # ── Tactical helpers ──
 
     def _tactical_signals(self) -> tuple[bool, bool, str]:
@@ -1346,31 +1758,72 @@ class DualLayerStrategy(BaseRiskStrategy):
         compression = regime == 3
 
         score_bo_l = float(df["score_breakout_long"].iloc[i])
-        score_bo_s = float(df["score_breakout_short"].iloc[i])
         score_pb_l = float(df["score_pullback_long"].iloc[i])
-        score_pb_s = float(df["score_pullback_short"].iloc[i])
+        # Short pullback: base score + failed-bounce bonus + derivative bonus
+        score_pb_s_raw = float(df["score_pullback_short"].iloc[i])
+        fb_bonus = 5 if bool(df["_failed_bounce_gate"].iloc[i]) else 0
+        deriv_bonus = float(df["_short_deriv_bonus"].iloc[i]) if "_short_deriv_bonus" in df.columns else 0.0
+        pa_bonus = float(df["_price_action_bonus"].iloc[i]) if "_price_action_bonus" in df.columns else 0.0
+        score_pb_s = score_pb_s_raw + fb_bonus + deriv_bonus + pa_bonus
         score_mr_l = float(df["score_meanrev_long"].iloc[i])
         score_mr_s = float(df["score_meanrev_short"].iloc[i])
+        score_crash_s = float(df["score_crash_short"].iloc[i]) + deriv_bonus + pa_bonus
+        score_bt_s = float(df["score_bull_trap_short"].iloc[i]) + deriv_bonus + pa_bonus
+        bt_gate = bool(df["_bull_trap_signal"].iloc[i])
         bo_th = self.risk_cfg.score_threshold_breakout
         pb_th = self.risk_cfg.score_threshold_pullback
         mr_th = self.risk_cfg.score_threshold_meanrev
+        crash_th = 75  # ≥75 (asymmetric weights)
+        pb_th_s = 999  # disabled (PF<1 in BTC)
+        bt_th = 80  # ≥80
+        mr_th_s = 85  # ≥85 (if enabled)
+        rsi_val = float(df["rsi_14"].iloc[i])
+        rsi_ok = rsi_val >= self.risk_cfg.short_rsi_floor
+        late_chase_bar = bool(df["_late_chase"].iloc[i])
+        late_ok = not late_chase_bar
+        d_ema_val = self._at("_d_ema_169")
+        close_val = self._at("Close")
 
-        # ── Ranging: mean-rev ONLY, no breakout/pullback ──
+        # ── Bull Guard: structural bull → block ALL shorts ──
+        bull_guard = bool(df["_bull_guard"].iloc[i]) or self._core_active
+        if bull_guard:
+            # All short modules blocked; only allow longs
+            pass  # fall through to long-only logic below
+
+        # ── Top Exhaustion Probe ──
+        top_score_val = float(df["_top_exhaustion_score"].iloc[i])
+        double_top_sig = bool(df["_double_top_signal"].iloc[i])
+        probe_allowed = not bull_guard and not self._bear_core_active and double_top_sig and top_score_val >= 70
+
+        # ── Layered Short Gates ──
+        short_env_ok = (
+            not bull_guard and regime != 4 and rsi_ok and late_ok
+        )
+        short_trend_ok = short_env_ok and close_val < d_ema_val and d_dir <= 0
+        short_aggressive_ok = short_trend_ok and w_dir <= 0
+
+        # ── Ranging: mean-rev long only (short blocked by bull guard) ──
         if ranging:
             if score_mr_l >= mr_th:
                 return True, False, "meanrev"
-            if score_mr_s >= mr_th:
-                return False, True, "meanrev"
             return False, False, "none"
 
-        # ── Strong Bear: shorts ONLY, no longs at all ──
+        # ── Strong Bear: crash(aggressive) > pullback(trend) > bull-trap(env) ──
         if strong_bear:
-            if score_bo_s >= bo_th:
-                return False, True, "breakout"
-            if score_pb_s >= pb_th:
+            if short_aggressive_ok and score_crash_s >= crash_th:
+                return False, True, "crash"
+            if short_trend_ok and score_pb_s >= pb_th_s:
                 return False, True, "pullback"
-            if score_mr_s >= mr_th:
-                return False, True, "meanrev"
+            if short_env_ok and bt_gate and score_bt_s >= bt_th:
+                return False, True, "bull_trap"
+            return False, False, "none"
+
+        # ── Weak Bear / Transition: pullback(trend) + bull-trap(env) ──
+        if not strong_bull and not ranging and not compression:
+            if short_trend_ok and score_pb_s >= pb_th_s:
+                return False, True, "pullback"
+            if short_env_ok and bt_gate and score_bt_s >= bt_th:
+                return False, True, "bull_trap"
             return False, False, "none"
 
         # ── Strong Bull: longs ONLY, no shorts at all ──
@@ -1401,6 +1854,86 @@ class DualLayerStrategy(BaseRiskStrategy):
             return False, False, "none"
 
         return False, False, "none"
+
+    def _check_partial_tp(self, is_long: bool) -> bool:
+        """Short-specific partial TP: crash=40%@1R+30%@2R, others=disabled."""
+        if is_long:
+            return super()._check_partial_tp(is_long)
+        # Short: only crash breakdown uses partial TP
+        mod = self._tac_module
+        entry = self._tac_entry_price
+        risk = abs(entry - self._tac_sl)
+        if risk <= 0:
+            return False
+        price = self._at("Close")
+        r_multiple = (entry - price) / risk
+        rcfg = self.risk_cfg
+
+        if mod == "crash":
+            if not getattr(self, "_tp1_done", False) and r_multiple >= rcfg.short_crash_tp1_r:
+                self._tp1_done = True; self._PARTIAL_TP_PCT = rcfg.short_crash_tp1_pct; return True
+            if getattr(self, "_tp1_done", False) and not getattr(self, "_tp2_done", False) and r_multiple >= rcfg.short_crash_tp2_r:
+                self._tp2_done = True; self._PARTIAL_TP_PCT = rcfg.short_crash_tp2_pct; return True
+        elif mod in ("pullback", "failed_bounce"):
+            if not getattr(self, "_tp1_done", False) and r_multiple >= rcfg.fb_tp1_r:
+                self._tp1_done = True; self._PARTIAL_TP_PCT = rcfg.fb_tp1_pct; return True
+            if getattr(self, "_tp1_done", False) and not getattr(self, "_tp2_done", False) and r_multiple >= rcfg.fb_tp2_r:
+                self._tp2_done = True; self._PARTIAL_TP_PCT = rcfg.fb_tp2_pct; return True
+        elif mod == "bear_core":
+            if not getattr(self, "_tp1_done", False) and r_multiple >= rcfg.bear_core_tp1_r:
+                self._tp1_done = True; self._PARTIAL_TP_PCT = rcfg.bear_core_tp1_pct; return True
+            if getattr(self, "_tp1_done", False) and not getattr(self, "_tp2_done", False) and r_multiple >= rcfg.bear_core_tp2_r:
+                self._tp2_done = True; self._PARTIAL_TP_PCT = rcfg.bear_core_tp2_pct; return True
+        return False
+
+    def _check_time_stop(self, is_long: bool) -> bool:
+        """Short-specific time stops: crash=8, pullback=10, bulltrap=6 bars.
+        Must reach 1R within timeout, and once reached, exit if falls below 0.5R."""
+        if is_long:
+            return super()._check_time_stop(is_long)
+        bars_held = self._bar_index() - self._tac_entry_bar
+        rcfg = self.risk_cfg
+        mod = self._tac_module
+        if mod == "crash":
+            timeout = rcfg.short_crash_timeout
+        elif mod in ("pullback", "failed_bounce"):
+            timeout = rcfg.fb_timeout
+        elif mod == "bear_core":
+            return False  # bear core uses daily trend exit only
+        elif mod == "bull_trap":
+            timeout = rcfg.short_bulltrap_timeout
+        else:
+            return False
+        risk = abs(self._tac_entry_price - self._tac_sl)
+        if risk <= 0:
+            return False
+        r_multiple = (self._tac_entry_price - self._at("Close")) / risk
+        # Track if we ever reached 1R
+        if r_multiple >= 1.0:
+            self._short_reached_1r = True
+        # After timeout: exit if never reached 1R
+        if bars_held >= timeout and not getattr(self, "_short_reached_1r", False):
+            return r_multiple < 1.0
+        # After reaching 1R: exit if profit evaporates below 1.0R (protect gains)
+        if getattr(self, "_short_reached_1r", False) and r_multiple < 1.0:
+            return True
+        return False
+
+    def _check_extra_exit(self, is_long: bool) -> bool:
+        """Short: Donchian 10 high exit for crash; DC20 low as target hit for others."""
+        if is_long:
+            return super()._check_extra_exit(is_long)
+        close = self._at("Close")
+        mod = self._tac_module
+        # Crash breakdown: DC10 high = exit
+        dc10_high = self._at("_dc20_high")  # reuse DC20; DC10 would need new column
+        dc10_high_10 = float(self.data.df["High"].rolling(10, min_periods=1).max().iloc[-1])
+        if mod == "crash" and close > dc10_high_10:
+            return True
+        # Pullback / Bull trap: DC20 low reached = target hit → exit
+        if mod in ("pullback", "failed_bounce", "bull_trap") and close <= self._at("_dc20_low"):
+            return True
+        return False
 
     def _calc_position_size(self, entry: float, sl: float) -> float:
         """Override: add weak-bull half-sizing."""
@@ -1445,12 +1978,46 @@ class DualLayerStrategy(BaseRiskStrategy):
             return None
         return sl, tp
 
+    def _check_short_giveback_guard(self, entry_price: float, sl_price: float) -> bool:
+        """Tiered R-level giveback protection for ALL shorts.
+
+        Peak >= 1R & drops to <= 0.25R → exit
+        Peak >= 2R & drops to <= 0.8R  → exit
+        Peak >= 4R & drops to <= 2.0R  → exit
+        """
+        risk = abs(entry_price - sl_price)
+        if risk <= 0:
+            return False
+        peak_r = (entry_price - self._at("Low")) / risk
+        prev_peak = getattr(self, '_short_giveback_peak_r', -999.0)
+        if peak_r > prev_peak:
+            self._short_giveback_peak_r = peak_r
+        current_r = (entry_price - self._at("Close")) / risk
+
+        if prev_peak >= 2.0 and current_r <= 0.5:
+            return True
+        if prev_peak >= 3.0 and current_r <= 1.0:
+            return True
+        if prev_peak >= 5.0 and current_r <= 2.0:
+            return True
+        return False
+
     def _check_tactical_exit(self) -> bool:
-        """Check if tactical SL/TP/trail is hit. Returns True if exit needed."""
+        """Check if tactical SL/TP/trail/time-stop is hit."""
         if self._tac_direction == 0:
             return False
 
         is_long = self._tac_direction == 1
+
+        # Tiered R-level giveback guard (all shorts)
+        if not is_long and self._tac_entry_price > 0 and self._tac_sl > 0:
+            if self._check_short_giveback_guard(self._tac_entry_price, self._tac_sl):
+                return True
+
+        # Time stop (before SL/TP — cuts losers early)
+        if self._check_time_stop(is_long):
+            return True
+
         price = self._at("Close")
         high = self._at("High")
         low = self._at("Low")
@@ -1495,13 +2062,13 @@ class DualLayerStrategy(BaseRiskStrategy):
             return float(self.position.size)
         return 0.0
 
-    def _enter_long(self, size: float):
+    def _enter_long(self, size: float, tag: str = "", sl: float | None = None, tp: float | None = None):
         """Enter or add to long position."""
-        self.buy(size=size)
+        self.buy(size=size, tag=tag, sl=sl, tp=tp)
 
-    def _enter_short(self, size: float):
-        """Enter or add to short position."""
-        self.sell(size=size)
+    def _enter_short(self, size: float, tag: str = "", sl: float | None = None, tp: float | None = None):
+        """Enter or add to short position with hard SL/TP."""
+        self.sell(size=size, tag=tag, sl=sl, tp=tp)
 
     def _close_portion(self, portion: float):
         """Close a portion of the current position."""
@@ -1535,7 +2102,7 @@ class DualLayerStrategy(BaseRiskStrategy):
             self._tac_direction = 0
             self._tac_size = 0.0
 
-        # ── Core exit check (before entry, even if paused) ──
+        # ── Core exit check ──
         if self._core_active and (self._core_exit_signal() or self._core_trail_stop_hit()):
             self._close_all()
             self._core_active = False
@@ -1545,6 +2112,81 @@ class DualLayerStrategy(BaseRiskStrategy):
             pnl = self.equity - getattr(self, "_eq_snapshot", self.equity)
             self._on_trade_closed(pnl)
             return
+
+        # ── Bear core exit (V-reversal + giveback + waterfall + trend) ──
+        if self._bear_core_active:
+            # V-reversal: made profit then snapped back → liquidity event, not bear
+            bc_sl = self._bear_core_sl()
+            risk = abs(self._bear_core_entry_price - bc_sl)
+            if risk > 0:
+                peak_r = getattr(self, '_bear_probe_peak_r', 0.0)
+                current_r = (self._bear_core_entry_price - self._at("Close")) / risk
+                bars = self._bar_index() - getattr(self, '_bear_core_entry_bar', -10**9)
+                if (peak_r >= 2.0 and current_r < 0.5 and bars <= 12
+                        and (self._at("_d_ema_dir") >= 0 or self._current_regime() != 2)):
+                    self._close_all()
+                    self._bear_core_active = False
+                    self._bear_core_size = 0.0
+                    self._tac_direction = 0; self._tac_size = 0.0
+                    self._waterfall_triggered = False; self._days_above_dema = 0
+                    self._on_trade_closed(self.equity - getattr(self, "_eq_snapshot", self.equity))
+                    return
+
+            # Tiered giveback guard for bear core
+            if self._check_short_giveback_guard(self._bear_core_entry_price, bc_sl):
+                self._close_all()
+                self._bear_core_active = False
+                self._bear_core_size = 0.0
+                self._tac_direction = 0; self._tac_size = 0.0
+                pnl = self.equity - getattr(self, "_eq_snapshot", self.equity)
+                self._on_trade_closed(pnl)
+                return
+
+            # Waterfall event runner: exit if profit drops below locked R
+            if getattr(self, '_bear_core_stage', 0) == 99:
+                sl = self._bear_core_sl()
+                risk = abs(self._bear_core_entry_price - sl)
+                if risk > 0:
+                    current_r = (self._bear_core_entry_price - self._at("Close")) / risk
+                    lock_r = getattr(self, '_waterfall_lock_r', 1.0)
+                    if current_r < lock_r * 0.5:
+                        self._close_all()
+                        self._bear_core_active = False
+                        self._bear_core_size = 0.0
+                        self._tac_direction = 0
+                        self._tac_size = 0.0
+                        self._waterfall_triggered = False
+                        self._days_above_dema = 0
+                        pnl = self.equity - getattr(self, "_eq_snapshot", self.equity)
+                        self._on_trade_closed(pnl)
+                        return
+
+        if self._bear_core_active and self._bear_core_exit_signal():
+            self._close_all()
+            self._bear_core_active = False
+            self._bear_core_size = 0.0
+            self._tac_direction = 0
+            self._tac_size = 0.0
+            self._days_above_dema = 0
+            pnl = self.equity - getattr(self, "_eq_snapshot", self.equity)
+            self._on_trade_closed(pnl)
+            return
+
+        # ── Bear core probe peak R tracker + waterfall guard ──
+        if self._bear_core_active:
+            sl = self._bear_core_sl()
+            risk = abs(self._bear_core_entry_price - sl)
+            if risk > 0:
+                current_r = (self._bear_core_entry_price - self._at("Low")) / risk
+                peak = getattr(self, '_bear_probe_peak_r', 0.0)
+                if current_r > peak:
+                    self._bear_probe_peak_r = current_r
+
+            # Waterfall profit guard: event-driven crash, not sustainable bear
+            if not getattr(self, '_waterfall_triggered', False):
+                if self._check_waterfall_profit_guard():
+                    self._waterfall_triggered = True
+                    return  # position modified, skip rest of this bar
 
         # ── Tactical exit check (before entry) ──
         if self._tac_direction != 0 and self._check_tactical_exit():
@@ -1569,7 +2211,7 @@ class DualLayerStrategy(BaseRiskStrategy):
             self._core_size = rcfg.risk_core_alloc
             self._days_below_dema = 0
             self._eq_snapshot = self.equity
-            self._enter_long(self._core_size)
+            self._enter_long(self._core_size, tag="core")
             self._last_trade_bar = i
 
         # ── Core add-on (pullback in bull) ──
@@ -1578,9 +2220,81 @@ class DualLayerStrategy(BaseRiskStrategy):
         if self._core_active and not getattr(self, "_core_fully_loaded", True) and self._core_add_signal():
             add_size = (rcfg.core_allocation - self._core_size) * max_pos
             if add_size > 0.001:
-                self._enter_long(add_size)
+                self._enter_long(add_size, tag="core_add")
                 self._core_size = rcfg.risk_core_alloc
                 self._core_fully_loaded = True
+
+        # ── Bear Core 3-stage entry (Probe → Confirm → Acceleration) ──
+        # Stage 1: Probe (top exhaustion + neckline break) → bear group gate
+        if not self._core_active and not self._bear_core_active:
+            _df = self.data.df
+            top_score_val = float(_df["_top_exhaustion_score"].iloc[i]) if "_top_exhaustion_score" in _df.columns else 0
+            double_top_sig = bool(_df["_double_top_signal"].iloc[i]) if "_double_top_signal" in _df.columns else False
+            bull_guard = bool(_df["_bull_guard"].iloc[i]) if "_bull_guard" in _df.columns else False
+            # Bear group: same structure within 30 bars → one probe per structure
+            same_group = (i - self._bear_group_entry_bar) <= 30
+            if same_group:
+                double_top_sig = False  # block re-entry
+            if double_top_sig and top_score_val >= 70 and not bull_guard:
+                self._bear_core_active = True
+                self._bear_core_stage = 1
+                self._bear_core_entry_price = self._at("Close")
+                self._bear_core_entry_bar = i
+                self._bear_probe_peak_r = 0.0
+                self._short_giveback_peak_r = -999.0
+                self._bear_core_size = rcfg.bear_core_full_pct * 0.35  # ~14% probe
+                # Bear group tracking
+                if not same_group:
+                    self._bear_group_id += 1
+                    self._bear_group_exposure = 0.0
+                    self._bear_group_entry_bar = i
+                    self._bear_group_peak_r = 0.0
+                self._bear_group_exposure += self._bear_core_size
+                self._days_above_dema = 0
+                self._eq_snapshot = self.equity
+                bc_sl = self._bear_core_sl()
+                self._enter_short(self._bear_core_size, tag="bear_core", sl=bc_sl)
+                self._last_trade_bar = i
+
+        # Stage 2: Confirm (prove + trend + group cap)
+        probe_entry_bar = getattr(self, '_bear_core_entry_bar', -10**9)
+        can_confirm_add = (
+            self._bear_core_active
+            and getattr(self, '_bear_core_stage', 0) == 1
+            and i > probe_entry_bar
+            and getattr(self, '_bear_probe_peak_r', 0.0) >= 1.0
+            and self._at("_d_ema_dir") < 0
+            and self._bear_group_exposure < self._bear_group_max_exposure  # group cap
+        )
+        if can_confirm_add:
+            w_dir = self._at("_w_ema_dir")
+            if w_dir <= 0 and self._at("Close") < self._at("_w_ema_169"):
+                add_size = rcfg.bear_core_full_pct * 0.65 - self._bear_core_size
+                if add_size > 0.001:
+                    bc_sl = self._bear_core_sl()
+                    self._enter_short(add_size, tag="bear_core", sl=bc_sl)
+                    self._bear_core_size = rcfg.bear_core_full_pct * 0.65
+                    self._bear_group_exposure += add_size
+                    self._bear_core_stage = 2
+                    self._last_trade_bar = i
+
+        # Stage 3: Acceleration (group cap + trend confirmed)
+        if (self._bear_core_active and getattr(self, '_bear_core_stage', 0) == 2
+                and i > getattr(self, '_last_trade_bar', -10**9)
+                and self._at("_d_ema_dir") < 0
+                and self._bear_group_exposure < self._bear_group_max_exposure):
+            adx_val = float(self.data.df["_adx_signal"].iloc[i]) if "_adx_signal" in self.data.df.columns else 0
+            plus_di = float(self.data.df["_plus_di"].iloc[i]) if "_plus_di" in self.data.df.columns else 0
+            minus_di = float(self.data.df["_minus_di"].iloc[i]) if "_minus_di" in self.data.df.columns else 0
+            if adx_val > 22 and minus_di > plus_di:
+                target = min(rcfg.bear_core_full_pct, self._bear_group_max_exposure)
+                add_size = target - self._bear_core_size
+                if add_size > 0.001:
+                    bc_sl = self._bear_core_sl()
+                    self._enter_short(add_size, tag="bear_core", sl=bc_sl)
+                    self._bear_core_size = target
+                    self._bear_group_exposure += add_size
+                    self._bear_core_stage = 3
 
         # ── Tactical entry ──
         regime = self._current_regime()
@@ -1596,12 +2310,21 @@ class DualLayerStrategy(BaseRiskStrategy):
                     reward = abs(tp - entry)
                     if risk > 0 and reward / risk >= 2.0:
                         self._tac_direction = 1 if is_long else -1
+                        self._tac_module = _module
+                        self._tp1_done = False
+                        self._tp2_done = False
+                        self._short_reached_1r = False
+                        self._short_peak_r = 0.0
+                        self._short_giveback_peak_r = -999.0
                         self._tac_entry_price = entry
                         self._tac_sl = sl
                         self._tac_tp = tp
                         # Module-specific risk: breakout 0.65%, pullback 0.50%, meanrev 0.25%
                         mod_risk = {'breakout': rcfg.risk_breakout,
+                                    'crash': rcfg.risk_breakout,
                                     'pullback': rcfg.risk_pullback,
+                                    'failed_bounce': rcfg.risk_pullback,
+                                    'bull_trap': rcfg.risk_pullback,
                                     'meanrev': rcfg.risk_meanrev}.get(_module, rcfg.risk_per_trade)
                         self._tac_size = mod_risk / (abs(entry - sl) / entry)
                         self._tac_size = min(self._tac_size, 0.99)
@@ -1611,9 +2334,9 @@ class DualLayerStrategy(BaseRiskStrategy):
                         self._tac_extreme = entry
                         self._last_trade_bar = i
                         if is_long:
-                            self._enter_long(self._tac_size)
+                            self._enter_long(self._tac_size, tag=_module, sl=sl, tp=tp)
                         else:
-                            self._enter_short(self._tac_size)
+                            self._enter_short(self._tac_size, tag=_module, sl=sl, tp=tp)
 
 
 class WeightedSignalStrategy(Strategy):

@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(\"D:\\\\机器学习作业\\\\Quant-for-BTC\\\\.venv\\\\Scripts\\\\python.exe\" -W ignore \"D:\\\\机器学习作业\\\\Quant-for-BTC\\\\run_backtest.py\" --exchange binanceus --timeout-ms 60000 --limit 50000 --max-retries 5 --strategy atr_htf)",
-      "Bash(D:\\\\机器学习作业\\\\Quant-for-BTC\\\\.venv\\\\Scripts\\\\python.exe *)"
+      "Bash(D:\\\\机器学习作业\\\\Quant-for-BTC\\\\.venv\\\\Scripts\\\\python.exe *)",
+      "Bash('D:\\\\机器学习作业\\\\Quant-for-BTC\\\\.venv\\\\Scripts\\\\python.exe' -W ignore -c ' *)",
+      "Bash(\"D:\\\\机器学习作业\\\\Quant-for-BTC\\\\.venv\\\\Scripts\\\\python.exe\" -W ignore \"D:\\\\机器学习作业\\\\Quant-for-BTC\\\\analyze_shorts.py\")"
     ]
   }
 }

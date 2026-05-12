@@ -5,8 +5,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from quant_btc.attribution import analyze as attr_analyze, format_report as attr_format
 from quant_btc.config import BacktestConfig, RiskConfig
-from quant_btc.data import DataFetchError, fetch_ohlcv
+from quant_btc.data import DataFetchError, fetch_derivative_data, fetch_ohlcv
+from quant_btc.strategy import compute_derivative_bonus
 from quant_btc.report import generate_report
 from quant_btc.strategy import (
     STRATEGY_MAP,
@@ -29,7 +31,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-retries", type=int, default=5)
     parser.add_argument("--proxy-url", type=str, default=None)
     parser.add_argument("--no-proxy", action="store_true")
-    parser.add_argument("--disable-binanceus-fallback", action="store_true")
+    parser.add_argument(
+        "--refresh-data", action="store_true",
+        help="Bypass cache and re-fetch OHLCV from exchange",
+    )
 
     parser.add_argument(
         "--strategy", type=str, default="htf",
@@ -42,6 +47,11 @@ def parse_args() -> argparse.Namespace:
         help="Run both HTF and ATR+HTF strategies and display a side-by-side comparison",
     )
     parser.add_argument("--leverage", type=int, default=5, help="Leverage multiplier (default: 5)")
+    parser.add_argument(
+        "--market-type", type=str, default="swap",
+        choices=["spot", "swap"],
+        help="Market type: spot (cash) or swap (perpetual futures).  Swap uses Binance/Bybit/OKX futures; spot uses Binance/BinanceUS.",
+    )
     return parser.parse_args()
 
 
@@ -75,6 +85,20 @@ def _run_single(
     print(f"{'='*60}")
 
     df = prepare_features(raw, cfg)
+
+    # Attach derivative bonus for short signals (Step 7)
+    if strategy_name in ("dual", "pullback", "breakout"):
+        try:
+            deriv = fetch_derivative_data(
+                cfg.symbol, exchange_id=cfg.exchange_id,
+                proxy_url=proxy_url,
+            )
+            df["_short_deriv_bonus"] = compute_derivative_bonus(df, deriv)
+        except Exception:
+            df["_short_deriv_bonus"] = 0.0
+    else:
+        df["_short_deriv_bonus"] = 0.0
+
     print(f"  Features ready: {len(df)} bars")
 
     stats, bt = run_backtest(df, cfg, strategy_name=strategy_name, risk_cfg=rcfg)
@@ -157,7 +181,7 @@ def main():
         os.environ.setdefault("HTTPS_PROXY", proxy_url)
         os.environ.setdefault("ALL_PROXY", proxy_url)
 
-    print(f"Fetching {cfg.symbol} {cfg.timeframe} history from {args.exchange} (limit={args.limit})...")
+    print(f"Fetching {cfg.symbol} {cfg.timeframe} history from {args.exchange} ({args.market_type}) (limit={args.limit})...")
     print(f"Proxy: {proxy_url}")
 
     try:
@@ -165,11 +189,12 @@ def main():
             symbol=cfg.symbol,
             timeframe=cfg.timeframe,
             limit=cfg.limit,
+            market_type=args.market_type,
             exchange_id=args.exchange,
             timeout_ms=args.timeout_ms,
             max_retries=args.max_retries,
-            fallback_to_binanceus=not args.disable_binanceus_fallback,
             proxy_url=proxy_url,
+            refresh=args.refresh_data,
         )
     except DataFetchError as exc:
         print(f"\n[Data Error] {exc}")
@@ -209,6 +234,11 @@ def main():
         stats, bt = _run_single(args, cfg, rcfg, proxy_url, raw, args.strategy, str(run_dir))
         report_str = generate_report(stats, bt, output_dir=str(run_dir))
         print(report_str)
+
+        # Attribution for dual-layer
+        if args.strategy == "dual":
+            attr = attr_analyze(stats, raw)
+            print(attr_format(attr))
 
 
 if __name__ == "__main__":

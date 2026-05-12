@@ -15,7 +15,48 @@ class RiskConfig:
     risk_breakout: float = 0.0065  # 0.5–0.8% per breakout trade
     risk_pullback: float = 0.0050  # 0.4–0.6% per pullback trade
     risk_meanrev: float = 0.0025  # 0.2–0.3% per mean-rev trade
-    risk_bear_short_mult: float = 0.60  # short risk = long risk × 60%
+    risk_bear_short_mult: float = 0.40  # short risk = long risk × 40% (tighter)
+
+    # --- Short-specific constraints ---
+    short_score_boost: int = 0  # base boost (module-specific overrides below)
+    short_breakout_boost: int = 0  # now controlled by crash_th directly in strategy
+    short_pullback_boost: int = 5   # pullback shorts: moderate boost (75+5=80)
+    short_meanrev_enabled: bool = True  # range-gated: only in regime=0 with d_dir<=0
+    short_require_weekly_bear: bool = True  # must have w_ema_dir <= 0
+    short_no_partial_tp: bool = True  # no partial TP for shorts (take full profit)
+    short_sl_atr_mult: float = 1.8  # tighter SL for shorts (vs 2.5 for longs)
+    short_rsi_floor: float = 30.0  # don't short when RSI < 30 (oversold bounce risk)
+
+    # --- Bear Core Short (long-term bear layer) ---
+    bear_core_probe_pct: float = 0.25  # probe at 25% of core allocation
+    bear_core_full_pct: float = 0.40  # full bear core = 40% equity
+    bear_core_sl_daily_atr: float = 3.0  # stop at 3× daily ATR
+    bear_core_exit_days_above_ema: int = 2  # exit after 2 daily closes > EMA169
+
+    # --- Module-specific short exits ---
+    # Bear Core (daily-level, no 4H timeout)
+    bear_core_tp1_r: float = 2.0  # partial TP at 2R
+    bear_core_tp1_pct: float = 0.25  # close 25%
+    bear_core_tp2_r: float = 4.0  # second partial at 4R
+    bear_core_tp2_pct: float = 0.25  # close 25%
+
+    # Failed Bounce (relaxed from pullback)
+    fb_tp1_r: float = 1.0  # 1R partial
+    fb_tp1_pct: float = 0.35  # close 35%
+    fb_tp2_r: float = 2.0  # 2R partial
+    fb_tp2_pct: float = 0.30  # close 30%
+    fb_timeout: int = 15  # relaxed from 10
+
+    # Crash Breakdown (aggressive, existing)
+    short_crash_tp1_r: float = 1.0
+    short_crash_tp1_pct: float = 0.40
+    short_crash_tp2_r: float = 2.0
+    short_crash_tp2_pct: float = 0.30
+    short_crash_timeout: int = 8
+    short_crash_trail_atr: float = 2.0
+
+    # Bull Trap (fast)
+    short_bulltrap_timeout: int = 6
     risk_core_alloc: float = 0.40  # core long: 40% of equity (spot-like)
 
     # --- ATR-based SL/TP (Scheme B: ATR + HTF) ---
@@ -133,9 +174,11 @@ class BacktestConfig:
     timeframe: str = "4h"
     limit: int = 50000
     initial_cash: float = 100_000
-    commission: float = 0.0006
+    commission: float = 0.0004  # 4 bps — typical futures taker fee
 
-    # Default local proxy
+    # Data source
+    market_type: str = "swap"  # "swap" (perpetual futures) or "spot"
+    exchange_id: str = "binance"  # binance / bybit / okx for swap
     proxy_url: str = "http://127.0.0.1:7897"
 
     # Signal model
