@@ -148,21 +148,47 @@ def analyze(stats: pd.Series, raw_df: pd.DataFrame) -> dict:
     df = _tag_trades(trades)
 
     # ── Layer attribution ──
-    core_tags = {"core", "core_add"}
-    tac_tags = {"breakout", "pullback", "meanrev"}
-    core_df = df[df["Tag"].isin(core_tags)]
-    tac_df = df[df["Tag"].isin(tac_tags)]
+    core_long_tags = {"core_long", "core_add_long"}
+    bear_core_tags = {"bear_core", "bear_core_add"}
+    tac_long_tags = {"breakout_retest_long", "pullback_struct_long", "meanrev_range_long", "sweep_reversal_long", "dip_buy_long"}
+    tac_short_tags = {"crash_short", "pullback_struct_short", "meanrev_range_short", "sweep_reversal_short", "bull_trap_short", "failed_bounce_short"}
+
+    core_long_df = df[df["Tag"].isin(core_long_tags)]
+    bear_core_df = df[df["Tag"].isin(bear_core_tags)]
+    tac_long_df = df[df["Tag"].isin(tac_long_tags)]
+    tac_short_df = df[df["Tag"].isin(tac_short_tags)]
 
     layer_stats = {
-        "core": _module_stats("Core Long", core_df, raw_df),
-        "tactical": _module_stats("Tactical", tac_df, raw_df),
+        "core_long": _module_stats("Core Long", core_long_df, raw_df),
+        "bear_core": _module_stats("Bear Core", bear_core_df, raw_df),
+        "tac_long": _module_stats("Tactical Long", tac_long_df, raw_df),
+        "tac_short": _module_stats("Tactical Short", tac_short_df, raw_df),
     }
 
     # ── Module attribution ──
     module_stats = {}
-    for tag in ["breakout", "pullback", "meanrev", "core"]:
-        sub = df[df["Tag"] == tag] if tag != "core" else core_df
-        module_stats[tag] = _module_stats(tag.capitalize(), sub, raw_df)
+    long_module_order = [
+        ("core_long", "Core Long"), ("core_add_long", "Core Add Long"),
+        ("breakout_retest_long", "Breakout Retest Long"),
+        ("pullback_struct_long", "Pullback Struct Long"),
+        ("meanrev_range_long", "MeanRev Range Long"),
+        ("sweep_reversal_long", "Sweep Reversal Long"),
+        ("dip_buy_long", "Dip Buy Long"),
+    ]
+    short_module_order = [
+        ("bear_core", "Bear Core"), ("crash_short", "Crash Short"),
+        ("pullback_struct_short", "Pullback Struct Short"),
+        ("sweep_reversal_short", "Sweep Reversal Short"),
+        ("failed_bounce_short", "Failed Bounce Short"),
+        ("bull_trap_short", "Bull Trap Short"),
+        ("meanrev_range_short", "MeanRev Range Short"),
+    ]
+
+    for tag, name in long_module_order + short_module_order:
+        sub = df[df["Tag"] == tag] if tag != "core_long" else core_long_df
+        if tag == "core_add_long":
+            sub = df[df["Tag"] == tag]
+        module_stats[tag] = _module_stats(name, sub, raw_df)
 
     # ── Direction attribution ──
     long_df = df[df["Size"] > 0]
@@ -257,21 +283,34 @@ def format_report(attribution: dict) -> str:
 
     # ── Layer ──
     sections.append(f"\n  {h}")
-    sections.append("  LAYER ATTRIBUTION (Core vs Tactical)")
+    sections.append("  LAYER ATTRIBUTION")
     sections.append(f"  {h}")
     sections.append(header)
     sections.append(f"  {'-'*103}")
-    for key in ["core", "tactical"]:
-        sections.append(_row(key.capitalize(), attribution["layer_stats"][key]))
+    for key in ["core_long", "bear_core", "tac_long", "tac_short"]:
+        sections.append(_row(attribution["layer_stats"][key].name, attribution["layer_stats"][key]))
 
-    # ── Module ──
+    # ── Long Modules ──
     sections.append(f"\n  {h}")
-    sections.append("  MODULE ATTRIBUTION (by entry signal)")
+    sections.append("  LONG MODULE ATTRIBUTION")
     sections.append(f"  {h}")
     sections.append(header)
     sections.append(f"  {'-'*103}")
-    for key in ["breakout", "pullback", "meanrev", "core"]:
-        sections.append(_row(key.capitalize(), attribution["module_stats"][key]))
+    for key in ["core_long", "breakout_retest_long", "pullback_struct_long", "meanrev_range_long", "sweep_reversal_long", "dip_buy_long"]:
+        s = attribution["module_stats"].get(key)
+        if s and s.trades > 0:
+            sections.append(_row(s.name, s))
+
+    # ── Short Modules ──
+    sections.append(f"\n  {h}")
+    sections.append("  SHORT MODULE ATTRIBUTION")
+    sections.append(f"  {h}")
+    sections.append(header)
+    sections.append(f"  {'-'*103}")
+    for key in ["bear_core", "crash_short", "pullback_struct_short", "sweep_reversal_short", "failed_bounce_short", "bull_trap_short", "meanrev_range_short"]:
+        s = attribution["module_stats"].get(key)
+        if s and s.trades > 0:
+            sections.append(_row(s.name, s))
 
     # ── Direction ──
     sections.append(f"\n  {h}")
@@ -280,7 +319,7 @@ def format_report(attribution: dict) -> str:
     sections.append(header)
     sections.append(f"  {'-'*103}")
     for key in ["long", "short"]:
-        sections.append(_row(key.capitalize(), attribution["direction_stats"][key]))
+        sections.append(_row(attribution["direction_stats"][key].name, attribution["direction_stats"][key]))
 
     # ── Regime ──
     if attribution.get("regime_stats"):

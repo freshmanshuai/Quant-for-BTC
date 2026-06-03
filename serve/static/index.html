@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VISUALIZATION — BTC Quant System</title>
+<link rel="stylesheet" href="css/dashboard.css">
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+</head>
+<body>
+<div id="app">
+  <nav id="sidebar">
+    <div class="sidebar-header">BTC Quant</div>
+    <ul class="nav-list">
+      <li class="nav-item" data-module="ohlcv">
+        <span class="nav-icon">▦</span> BTC Price Chart
+      </li>
+      <li class="nav-item" data-module="returns">
+        <span class="nav-icon">⊙</span> Returns Analysis
+      </li>
+      <li class="nav-item active" data-module="orders">
+        <span class="nav-icon">☷</span> Trade Orders
+      </li>
+    </ul>
+    <div class="sidebar-footer" id="sidebar-summary">
+      <div class="stat-row"><span>Total PnL</span><span id="s-pnl">--</span></div>
+      <div class="stat-row"><span>Win Rate</span><span id="s-wr">--</span></div>
+      <div class="stat-row"><span>Sharpe</span><span id="s-sharpe">--</span></div>
+    </div>
+  </nav>
+
+  <main id="content">
+    <!-- Module: OHLCV -->
+    <section id="module-ohlcv" class="module">
+      <div class="module-header">
+        <h2>BTC Futures Price</h2>
+        <div class="tf-selector">
+          <button class="tf-btn active" data-tf="15m">15m</button>
+          <button class="tf-btn" data-tf="1h">1h</button>
+          <button class="tf-btn" data-tf="4h">4h</button>
+        </div>
+      </div>
+      <div id="chart-ohlcv" class="chart-container"></div>
+    </section>
+
+    <!-- Module: Returns -->
+    <section id="module-returns" class="module">
+      <div class="summary-cards" id="summary-cards"></div>
+      <div class="chart-row">
+        <div class="chart-half">
+          <h3>Equity Curve & Drawdown</h3>
+          <div id="chart-equity" class="chart-container"></div>
+        </div>
+        <div class="chart-half">
+          <h3>Monthly Returns Heatmap</h3>
+          <div id="chart-heatmap" class="chart-container"></div>
+        </div>
+      </div>
+      <div class="chart-row">
+        <div class="chart-full">
+          <h3>Trade PnL Distribution</h3>
+          <div id="chart-distribution" class="chart-container-short"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Module: Orders -->
+    <section id="module-orders" class="module active">
+      <div class="orders-toolbar">
+        <select id="filter-direction"><option value="all">All Directions</option><option>LONG</option><option>SHORT</option></select>
+        <select id="filter-module"><option value="all">All Modules</option></select>
+        <div class="orders-summary" id="orders-summary"></div>
+        <div class="pagination" id="pagination"></div>
+      </div>
+      <div class="table-wrap">
+        <table id="orders-table">
+          <thead>
+            <tr>
+              <th data-sort="trade_id">#</th>
+              <th data-sort="entry_time">Entry</th>
+              <th data-sort="exit_time">Exit</th>
+              <th data-sort="duration">Dur</th>
+              <th data-sort="direction">Dir</th>
+              <th data-sort="module">Module</th>
+              <th data-sort="entry_price">Entry$</th>
+              <th data-sort="exit_price">Exit$</th>
+              <th data-sort="pnl">PnL$</th>
+              <th data-sort="pnl_pct">Ret%</th>
+              <th data-sort="max_mfe_pct">MFE%</th>
+              <th data-sort="max_mae_pct">MAE%</th>
+              <th data-sort="exit_reason">Exit</th>
+            </tr>
+          </thead>
+          <tbody id="orders-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="js/main.js?v=3"></script>
+<script src="js/chart_ohlcv.js?v=3"></script>
+<script src="js/returns.js?v=3"></script>
+<script src="js/orders.js?v=3"></script>
+</body>
+</html>

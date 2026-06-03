@@ -437,6 +437,175 @@ def _add_score_columns(df: pd.DataFrame):
     df["score_pullback_long"] = (mk_long + pat_pullback_l + mom_l + risk_score).clip(0, 100)
     df["score_meanrev_long"] = (mk_long + pat_meanrev_l + mom_l + risk_score).clip(0, 100)
 
+    # ═══════════ Module 4: Liquidity Sweep Reversal ═══════════
+    # Price sweeps below key level, then reclaims. High-WR, tight SL.
+    dc20_low_sweep = df["mr_dc20_low"].shift(1)  # previous bar's DC20 low
+    dc20_high_sweep = df["mr_dc20_high"].shift(1)
+    bb_lower_sweep = df["bb_lower"].shift(1)
+    bb_upper_sweep = df["bb_upper"].shift(1)
+    key_low = np.minimum(dc20_low_sweep, bb_lower_sweep)
+    key_high = np.maximum(dc20_high_sweep, bb_upper_sweep)
+    _lw_sweep = (np.minimum(df["Open"], close) - df["Low"]) / (df["High"] - df["Low"]).clip(1e-10)
+    _uw_sweep = (df["High"] - np.maximum(df["Open"], close)) / (df["High"] - df["Low"]).clip(1e-10)
+
+    # Sweep detected: price went below support then closed back above
+    sweep_low_bar = df["Low"] < key_low
+    reclaim_long = sweep_low_bar & (close > key_low)  # same bar reclaim
+    sweep_high_bar = df["High"] > key_high
+    reclaim_short = sweep_high_bar & (close < key_high)
+
+    # Sweep quality score (0-30): depth + reclaim strength + wick
+    sweep_depth_l = ((key_low - df["Low"]) / atr).clip(0, 1.5) / 1.5 * 8
+    reclaim_strength_l = ((close - key_low) / atr).clip(0, 1.5) / 1.5 * 8
+    sweep_depth_s = ((df["High"] - key_high) / atr).clip(0, 1.5) / 1.5 * 8
+    reclaim_strength_s = ((key_high - close) / atr).clip(0, 1.5) / 1.5 * 8
+    wick_sweep_l = _lw_sweep.clip(0.35, 0.7) / 0.35 * 7
+    wick_sweep_s = _uw_sweep.clip(0.35, 0.7) / 0.35 * 7
+
+    pat_sweep_l = pd.Series(0.0, index=df.index)
+    pat_sweep_l[sweep_low_bar] = sweep_depth_l + wick_sweep_l + 7
+    pat_sweep_l[reclaim_long] = reclaim_strength_l + 7
+    pat_sweep_l = pat_sweep_l.clip(0, 30)
+
+    pat_sweep_s = pd.Series(0.0, index=df.index)
+    pat_sweep_s[sweep_high_bar] = sweep_depth_s + wick_sweep_s + 7
+    pat_sweep_s[reclaim_short] = reclaim_strength_s + 7
+    pat_sweep_s = pat_sweep_s.clip(0, 30)
+
+    df["score_sweep_reversal_long"] = (mk_long + pat_sweep_l + mom_l + risk_score).clip(0, 100)
+    df["score_sweep_reversal_short"] = (mk_short + pat_sweep_s + mom_s + risk_score).clip(0, 100)
+    df["_sweep_signal_long"] = reclaim_long
+    df["_sweep_signal_short"] = reclaim_short
+
+    # ═══════════ Module 5: Perp Crowding ═══════════
+    # Long bonus: extreme negative funding + OI rising + price not falling = short squeeze risk
+    # Uses _short_deriv_bonus infrastructure. Add a LONG bonus for crowded shorts.
+    # This is computed later (post-dropna) in run_backtest.py via compute_derivative_bonus.
+    # For now, add the placeholder column.
+    df["_perp_crowding_long_bonus"] = 0.0  # filled post-dropna
+
+    # ═══════════ Tactical v2: New Module Scoring ═══════════
+
+    # ── Module 1: Breakout Retest ──
+    # 4H breakout above DC55, then retests breakout level without falling back.
+    dc55_high_prev_v2 = df["roll_high_55"].shift(1)
+    dc55_low_prev_v2 = df["roll_low_55"].shift(1)
+    breakout_level_l = dc55_high_prev_v2
+    breakout_level_s = dc55_low_prev_v2
+
+    # Breakout bar: close > DC55 high (shifted, no look-ahead)
+    broke_out_l = close > dc55_high_prev_v2
+    broke_out_s = close < dc55_low_prev_v2
+
+    # Retest zone: price within 1.5% of breakout level after breakout
+    in_retest_zone_l = (close / breakout_level_l - 1).abs() < 0.015
+    in_retest_zone_s = (close / breakout_level_s - 1).abs() < 0.015
+
+    # Retest happened: a bar AFTER breakout pulled back to breakout level
+    retest_bar_l = broke_out_l.shift(1) & in_retest_zone_l
+    retest_bar_s = broke_out_s.shift(1) & in_retest_zone_s
+
+    # Retest hold: retest bar's low stays above breakout level (long) or high below (short)
+    retest_hold_l = retest_bar_l & (df["Low"] > breakout_level_l * 0.995)
+    retest_hold_s = retest_bar_s & (df["High"] < breakout_level_s * 1.005)
+
+    # Retest breakout: next bar breaks above retest bar's high
+    retest_break_l = (close > df["High"].shift(1)) & retest_hold_l.shift(1)
+    retest_break_s = (close < df["Low"].shift(1)) & retest_hold_s.shift(1)
+
+    # Volume on retest breakout
+    retest_vol_l = vol_z > 0
+    retest_vol_s = vol_z > 0
+
+    # Pattern score (0-30): breakout strength + retest quality
+    bo_strength_l = ((close - breakout_level_l) / atr).clip(0, 3) / 3 * 10
+    bo_strength_s = ((breakout_level_s - close) / atr).clip(0, 3) / 3 * 10
+    retest_quality_l = pd.Series(0.0, index=df.index)
+    retest_quality_l[retest_hold_l] = 10
+    retest_quality_l[retest_break_l] = 10
+    retest_quality_s = pd.Series(0.0, index=df.index)
+    retest_quality_s[retest_hold_s] = 10
+    retest_quality_s[retest_break_s] = 10
+
+    pat_retest_l = (bo_strength_l + retest_quality_l).clip(0, 30)
+    pat_retest_s = (bo_strength_s + retest_quality_s).clip(0, 30)
+
+    df["score_breakout_retest_long"] = (mk_long + pat_retest_l + mom_l + risk_score).clip(0, 100)
+
+    # ── Module 2: Trend Pullback Structure ──
+    # Trend up + pullback to EMA55/VWAP zone + higher low forms + breaks pullback high.
+    ema55_val = df["ema55"]
+    ema144_val = df["ema144"]
+    pullback_zone_l = (close >= ema55_val * 0.98) & (close <= ema144_val * 1.02)
+    pullback_zone_s = (close <= ema55_val * 1.02) & (close >= ema144_val * 0.98)
+
+    # Swing pivot detection (reuse fractal pivots from price action module)
+    pivot_high_pb = (df["High"].shift(4) < df["High"].shift(3)) & (df["High"].shift(3) < df["High"].shift(2)) & (df["High"].shift(2) > df["High"].shift(1)) & (df["High"].shift(1) > df["High"])
+    pivot_low_pb = (df["Low"].shift(4) > df["Low"].shift(3)) & (df["Low"].shift(3) > df["Low"].shift(2)) & (df["Low"].shift(2) < df["Low"].shift(1)) & (df["Low"].shift(1) < df["Low"])
+
+    # Higher low (long): most recent pivot low > previous pivot low
+    pl_val_pb = pd.Series(np.where(pivot_low_pb, df["Low"].shift(2), np.nan), index=df.index).ffill()
+    pl_prev_pb = pl_val_pb.where(pl_val_pb.diff().abs() > 1e-8).shift(1).ffill()
+    higher_low = pivot_low_pb & (pl_val_pb > pl_prev_pb) & pl_prev_pb.notna()
+
+    # Lower high (short): most recent pivot high < previous pivot high
+    ph_val_pb = pd.Series(np.where(pivot_high_pb, df["High"].shift(2), np.nan), index=df.index).ffill()
+    ph_prev_pb = ph_val_pb.where(ph_val_pb.diff().abs() > 1e-8).shift(1).ffill()
+    lower_high = pivot_high_pb & (ph_val_pb < ph_prev_pb) & ph_prev_pb.notna()
+
+    # Structure confirmed: higher_low exists recently (50 bars) + breaks pullback's local high
+    has_higher_low = higher_low.rolling(50, min_periods=1).max().astype(bool)
+    has_lower_high = lower_high.rolling(50, min_periods=1).max().astype(bool)
+    breaks_pb_high = close > df["High"].shift(1)
+    breaks_pb_low = close < df["Low"].shift(1)
+
+    # Pattern score (0-30)
+    pat_struct_l = pd.Series(0.0, index=df.index)
+    pat_struct_l[pullback_zone_l] = 8
+    pat_struct_l[has_higher_low] = 12
+    pat_struct_l[breaks_pb_high] = 10
+    pat_struct_l = pat_struct_l.clip(0, 30)
+
+    pat_struct_s = pd.Series(0.0, index=df.index)
+    pat_struct_s[pullback_zone_s] = 8
+    pat_struct_s[has_lower_high] = 12
+    pat_struct_s[breaks_pb_low] = 10
+    pat_struct_s = pat_struct_s.clip(0, 30)
+
+    df["score_pullback_struct_long"] = (mk_long + pat_struct_l + mom_l + risk_score).clip(0, 100)
+    df["score_pullback_struct_short"] = (mk_short + pat_struct_s + mom_s + risk_score).clip(0, 100)
+
+    # ── Module 3: Enhanced Range BB Mean Reversion ──
+    # Only in strict ranging: ADX < 20, BB width not expanding, within DC55 range.
+    _bb_mid_v2 = (df["bb_upper"] + df["bb_lower"]) / 2
+    _bb_width_v2 = (df["bb_upper"] - df["bb_lower"]) / _bb_mid_v2.clip(1e-10)
+    bb_width_expanding = _bb_width_v2 > _bb_width_v2.shift(5)
+    dc55_range_v2 = df["roll_high_55"] - df["roll_low_55"]
+    within_dc55_v2 = (close > df["roll_low_55"] + 0.05 * dc55_range_v2) & (close < df["roll_high_55"] - 0.05 * dc55_range_v2)
+    strict_ranging = (adx < 20) & ~bb_width_expanding & within_dc55_v2
+
+    # Touch lower band + reclaim
+    reclaimed_lower = (df["Low"].shift(1) < df["bb_lower"].shift(1)) & (close > df["bb_lower"])
+    reclaimed_upper = (df["High"].shift(1) > df["bb_upper"].shift(1)) & (close < df["bb_upper"])
+    _lw = (np.minimum(df["Open"], close) - df["Low"]) / (df["High"] - df["Low"]).clip(1e-10)
+    _uw = (df["High"] - np.maximum(df["Open"], close)) / (df["High"] - df["Low"]).clip(1e-10)
+
+    # Target: BB mid only
+    pat_range_l = pd.Series(0.0, index=df.index)
+    pat_range_l[strict_ranging] = 10
+    pat_range_l[reclaimed_lower] = 12
+    pat_range_l[_lw > 0.35] = 8
+    pat_range_l = pat_range_l.clip(0, 30)
+
+    pat_range_s = pd.Series(0.0, index=df.index)
+    pat_range_s[strict_ranging] = 10
+    pat_range_s[reclaimed_upper] = 12
+    pat_range_s[_uw > 0.35] = 8
+    pat_range_s = pat_range_s.clip(0, 30)
+
+    df["score_meanrev_range_long"] = (mk_long + pat_range_l + mom_l + risk_score).clip(0, 100)
+    df["score_meanrev_range_short"] = (mk_short + pat_range_s + mom_s + risk_score).clip(0, 100)
+
     # ── Short scores: asymmetric weights (35/30/15/10) + deriv (10, added later) ──
     # Bear context dominates, momentum de-weighted, risk tighter.
     _ss = lambda mk, pat, mom, risk: (
@@ -719,9 +888,27 @@ def compute_derivative_bonus(df: pd.DataFrame, deriv_df: pd.DataFrame | None) ->
     dc20_low = close.rolling(20, min_periods=1).min()
     delever = (close < dc20_low.shift(1)) & (oi_change < -0.03)
 
-    bonus[crowded] += 10
-    bonus[delever] += 10
-    return bonus.clip(0, 20)
+    # ── Short bonus ──
+    bonus_short = pd.Series(0.0, index=df.index)
+    bonus_short[crowded] += 10
+    bonus_short[delever] += 10
+    bonus_short = bonus_short.clip(0, 20)
+
+    # ── Long bonus: crowded shorts → short squeeze risk ──
+    # Extreme negative funding + OI rising + price not falling
+    crowded_shorts = (funding_z < -1.5) & (oi_change > 0.05) & (price_change > -0.02)
+    # Deleveraging shorts: price breaks above resistance + OI dropping = shorts covering
+    dc20_high_val = close.rolling(20, min_periods=1).max()
+    short_cover = (close > dc20_high_val.shift(1)) & (oi_change < -0.03)
+    bonus_long = pd.Series(0.0, index=df.index)
+    bonus_long[crowded_shorts] += 10
+    bonus_long[short_cover] += 10
+    bonus_long = bonus_long.clip(0, 20)
+
+    # Store both in DataFrame
+    df["_short_deriv_bonus"] = bonus_short
+    df["_perp_crowding_long_bonus"] = bonus_long
+    return bonus_short
 
 
 # ═══════════════════ Risk feature helpers (called from Strategy.init) ═══════════════════
@@ -1546,8 +1733,11 @@ class DualLayerStrategy(BaseRiskStrategy):
     _USE_FIXED_TP = False
     _BREAKOUT_MODE = False
     _MIN_RR = 2.0
-    _USE_TIME_STOP = True  # shorts use aggressive time stops
-    _USE_PARTIAL_TP = True  # shorts use module-specific partial TP
+    _USE_TIME_STOP = True
+    _USE_PARTIAL_TP = True
+
+    # MTF (multi-timeframe) data — set by run_backtest.py before backtest
+    _mtf_15m: pd.DataFrame | None = None
 
     def init(self):
         super().init()
@@ -1581,6 +1771,8 @@ class DualLayerStrategy(BaseRiskStrategy):
         self._days_above_dema = 0
         self._waterfall_triggered = False
         self._waterfall_lock_r = 0.0
+        self._flash_crash_active = False
+        self._flash_crash_bar = -10**9
         # Bear group risk tracking
         self._bear_group_id = 0  # incremented per structure
         self._bear_group_exposure = 0.0
@@ -1732,6 +1924,66 @@ class DualLayerStrategy(BaseRiskStrategy):
 
         return False
 
+    # ── MTF (15m) confirmation helpers ──
+
+    def _mtf_15m_bars(self) -> pd.DataFrame | None:
+        """Return 15m bars within the current 4H bar window."""
+        mtf = DualLayerStrategy._mtf_15m
+        if mtf is None or mtf.empty:
+            return None
+        ts = self.data.df.index[-1]
+        end = ts + pd.Timedelta(hours=4)
+        return mtf[(mtf.index >= ts) & (mtf.index < end)]
+
+    def _mtf_sweep_reclaim(self, is_long: bool, key_level: float) -> bool:
+        """Check 15m bars: sweep below key level then reclaim above it."""
+        bars = self._mtf_15m_bars()
+        if bars is None or len(bars) < 3:
+            return False
+        if is_long:
+            swept = (bars["Low"] < key_level).any()
+            if not swept:
+                return False
+            # Last 2 bars: closed back above key level
+            last2 = bars.iloc[-2:]
+            return (last2["Close"] > key_level).all()
+        else:
+            swept = (bars["High"] > key_level).any()
+            if not swept:
+                return False
+            last2 = bars.iloc[-2:]
+            return (last2["Close"] < key_level).all()
+
+    def _mtf_no_new_extreme(self, is_long: bool) -> bool:
+        """Check 15m: last 2 bars didn't make new low (long) or new high (short)."""
+        bars = self._mtf_15m_bars()
+        if bars is None or len(bars) < 4:
+            return False
+        mid = len(bars) // 2
+        first_half = bars.iloc[:mid]
+        second_half = bars.iloc[mid:]
+        if is_long:
+            return second_half["Low"].min() >= first_half["Low"].min()
+        else:
+            return second_half["High"].max() <= first_half["High"].max()
+
+    def _mtf_higher_low_formed(self) -> bool:
+        """15m: a higher low formed within this 4H bar."""
+        bars = self._mtf_15m_bars()
+        if bars is None or len(bars) < 6:
+            return False
+        lows = bars["Low"].values
+        # Find a swing low: a bar whose low is lower than both neighbors
+        for i in range(2, len(lows) - 2):
+            if lows[i] < lows[i-1] and lows[i] < lows[i-2] and lows[i] < lows[i+1] and lows[i] < lows[i+2]:
+                # Check if this swing low is higher than previous swing low
+                prev_lows = lows[:i]
+                if len(prev_lows) > 3:
+                    prev_swing = min(prev_lows[1:-1])  # approximate
+                    if lows[i] > prev_swing:
+                        return True
+        return False
+
     # ── Tactical helpers ──
 
     def _tactical_signals(self) -> tuple[bool, bool, str]:
@@ -1757,22 +2009,38 @@ class DualLayerStrategy(BaseRiskStrategy):
         ranging = regime == 0
         compression = regime == 3
 
-        score_bo_l = float(df["score_breakout_long"].iloc[i])
-        score_pb_l = float(df["score_pullback_long"].iloc[i])
-        # Short pullback: base score + failed-bounce bonus + derivative bonus
-        score_pb_s_raw = float(df["score_pullback_short"].iloc[i])
-        fb_bonus = 5 if bool(df["_failed_bounce_gate"].iloc[i]) else 0
+        # New tactical v2 scores (Modules 1-5)
+        score_bo_retest_l = float(df["score_breakout_retest_long"].iloc[i])
+        score_pb_struct_l = float(df["score_pullback_struct_long"].iloc[i])
+        score_pb_struct_s = float(df["score_pullback_struct_short"].iloc[i])
+        score_mr_range_l = float(df["score_meanrev_range_long"].iloc[i])
+        score_mr_range_s = float(df["score_meanrev_range_short"].iloc[i])
+        score_sweep_l = float(df["score_sweep_reversal_long"].iloc[i])
+        score_sweep_s = float(df["score_sweep_reversal_short"].iloc[i])
+        # Bonuses
         deriv_bonus = float(df["_short_deriv_bonus"].iloc[i]) if "_short_deriv_bonus" in df.columns else 0.0
         pa_bonus = float(df["_price_action_bonus"].iloc[i]) if "_price_action_bonus" in df.columns else 0.0
-        score_pb_s = score_pb_s_raw + fb_bonus + deriv_bonus + pa_bonus
-        score_mr_l = float(df["score_meanrev_long"].iloc[i])
-        score_mr_s = float(df["score_meanrev_short"].iloc[i])
+        fb_bonus = 5 if bool(df["_failed_bounce_gate"].iloc[i]) else 0
+        perp_long_bonus = float(df["_perp_crowding_long_bonus"].iloc[i]) if "_perp_crowding_long_bonus" in df.columns else 0.0
+        # Short scores with bonuses
+        score_pb_s = score_pb_struct_s + fb_bonus + deriv_bonus + pa_bonus
         score_crash_s = float(df["score_crash_short"].iloc[i]) + deriv_bonus + pa_bonus
         score_bt_s = float(df["score_bull_trap_short"].iloc[i]) + deriv_bonus + pa_bonus
         bt_gate = bool(df["_bull_trap_signal"].iloc[i])
-        bo_th = self.risk_cfg.score_threshold_breakout
-        pb_th = self.risk_cfg.score_threshold_pullback
-        mr_th = self.risk_cfg.score_threshold_meanrev
+        bo_retest_th = 70   # Module 1: Breakout Retest
+        pb_struct_th = 70   # Module 2: Trend Pullback Structure
+        mr_range_th = 75    # Module 3: Enhanced Range BB MR
+        sweep_th = 65       # Module 4: Liquidity Sweep Reversal
+        sweep_gate_l = bool(df["_sweep_signal_long"].iloc[i])
+        sweep_gate_s = bool(df["_sweep_signal_short"].iloc[i])
+        # MTF (15m) confirmation bonuses
+        mtf_confirm_l = self._mtf_no_new_extreme(True) if sweep_gate_l else False
+        mtf_confirm_s = self._mtf_no_new_extreme(False) if sweep_gate_s else False
+        mtf_hl = self._mtf_higher_low_formed()  # higher low for retest/pullback
+        sweep_score_l = score_sweep_l + (10 if mtf_confirm_l else 0)
+        sweep_score_s = score_sweep_s + (10 if mtf_confirm_s else 0)
+        retest_score_l = score_bo_retest_l + (5 if mtf_hl else 0)
+        struct_score_l = score_pb_struct_l + (5 if mtf_hl else 0)
         crash_th = 75  # ≥75 (asymmetric weights)
         pb_th_s = 999  # disabled (PF<1 in BTC)
         bt_th = 80  # ≥80
@@ -1802,55 +2070,68 @@ class DualLayerStrategy(BaseRiskStrategy):
         short_trend_ok = short_env_ok and close_val < d_ema_val and d_dir <= 0
         short_aggressive_ok = short_trend_ok and w_dir <= 0
 
-        # ── Ranging: mean-rev long only (short blocked by bull guard) ──
+        # ── Ranging: range MR + sweep ──
         if ranging:
-            if score_mr_l >= mr_th:
-                return True, False, "meanrev"
+            if score_mr_range_l >= mr_range_th:
+                return True, False, "meanrev_range"
+            if sweep_gate_l and sweep_score_l + perp_long_bonus >= sweep_th:
+                return True, False, "sweep_reversal"
+            if sweep_gate_s and sweep_score_s >= sweep_th:
+                return False, True, "sweep_reversal"
             return False, False, "none"
 
-        # ── Strong Bear: crash(aggressive) > pullback(trend) > bull-trap(env) ──
+        # ── Strong Bear: crash > struct > sweep > bull-trap ──
         if strong_bear:
             if short_aggressive_ok and score_crash_s >= crash_th:
                 return False, True, "crash"
             if short_trend_ok and score_pb_s >= pb_th_s:
-                return False, True, "pullback"
+                return False, True, "pullback_struct"
+            if sweep_gate_s and sweep_score_s >= sweep_th:
+                return False, True, "sweep_reversal"
             if short_env_ok and bt_gate and score_bt_s >= bt_th:
                 return False, True, "bull_trap"
             return False, False, "none"
 
-        # ── Weak Bear / Transition: pullback(trend) + bull-trap(env) ──
+        # ── Weak Bear / Transition: struct + sweep + bull-trap ──
         if not strong_bull and not ranging and not compression:
             if short_trend_ok and score_pb_s >= pb_th_s:
-                return False, True, "pullback"
+                return False, True, "pullback_struct"
+            if sweep_gate_s and sweep_score_s >= sweep_th:
+                return False, True, "sweep_reversal"
             if short_env_ok and bt_gate and score_bt_s >= bt_th:
                 return False, True, "bull_trap"
             return False, False, "none"
 
-        # ── Strong Bull: longs ONLY, no shorts at all ──
+        # ── Strong Bull: retest > struct > sweep > range ──
         if strong_bull:
-            if score_bo_l >= bo_th:
-                return True, False, "breakout"
-            if score_pb_l >= pb_th:
-                return True, False, "pullback"
-            if score_mr_l >= mr_th:
-                return True, False, "meanrev"
+            if retest_score_l >= bo_retest_th:
+                return True, False, "breakout_retest"
+            if score_pb_struct_l + perp_long_bonus >= pb_struct_th:
+                return True, False, "pullback_struct"
+            if sweep_gate_l and sweep_score_l + perp_long_bonus >= sweep_th:
+                return True, False, "sweep_reversal"
+            if score_mr_range_l >= mr_range_th:
+                return True, False, "meanrev_range"
             return False, False, "none"
 
-        # ── Compression: breakout longs ──
+        # ── Compression: retest + sweep ──
         if compression:
-            if score_bo_l >= bo_th:
-                return True, False, "breakout"
+            if retest_score_l >= bo_retest_th:
+                return True, False, "breakout_retest"
+            if sweep_gate_l and sweep_score_l >= sweep_th:
+                return True, False, "sweep_reversal"
             return False, False, "none"
 
-        # ── Weak Bull / Transition: high-quality BO/PB only, both directions allowed ──
-        # (half-sizing handled by _calc_position_size via HTF direction check)
+        # ── Weak Bull / Transition: retest + struct + sweep ──
         if weak_bull:
-            if score_bo_l >= bo_th:
-                return True, False, "breakout"
-            if score_pb_l >= pb_th:
-                return True, False, "pullback"
-            if score_mr_l >= mr_th:
-                return True, False, "meanrev"
+            if retest_score_l >= bo_retest_th:
+                return True, False, "breakout_retest"
+            if score_pb_struct_l + perp_long_bonus >= pb_struct_th:
+                return True, False, "pullback_struct"
+            if sweep_gate_l and sweep_score_l + perp_long_bonus >= sweep_th:
+                return True, False, "sweep_reversal"
+            if score_mr_range_l >= mr_range_th:
+                return True, False, "meanrev_range"
             return False, False, "none"
 
         return False, False, "none"
@@ -2079,6 +2360,16 @@ class DualLayerStrategy(BaseRiskStrategy):
         if self.position:
             self.position.close()
 
+    def _close_layer(self, layer_size: float):
+        """Close only a specific layer, leaving other layers intact."""
+        if not self.position or layer_size <= 0:
+            return
+        total = abs(float(self.position.size))
+        if total < 0.0001:
+            return
+        portion = min(layer_size / total, 1.0)
+        self.position.close(portion=portion)
+
     # ── Main loop ──
 
     def next(self):
@@ -2102,15 +2393,11 @@ class DualLayerStrategy(BaseRiskStrategy):
             self._tac_direction = 0
             self._tac_size = 0.0
 
-        # ── Core exit check ──
+        # ── Core exit (close core layer only) ──
         if self._core_active and (self._core_exit_signal() or self._core_trail_stop_hit()):
-            self._close_all()
+            self._close_layer(self._core_size)
             self._core_active = False
             self._core_size = 0.0
-            self._tac_direction = 0
-            self._tac_size = 0.0
-            pnl = self.equity - getattr(self, "_eq_snapshot", self.equity)
-            self._on_trade_closed(pnl)
             return
 
         # ── Bear core exit (V-reversal + giveback + waterfall + trend) ──
@@ -2124,20 +2411,18 @@ class DualLayerStrategy(BaseRiskStrategy):
                 bars = self._bar_index() - getattr(self, '_bear_core_entry_bar', -10**9)
                 if (peak_r >= 2.0 and current_r < 0.5 and bars <= 12
                         and (self._at("_d_ema_dir") >= 0 or self._current_regime() != 2)):
-                    self._close_all()
+                    self._close_layer(self._bear_core_size)
                     self._bear_core_active = False
                     self._bear_core_size = 0.0
-                    self._tac_direction = 0; self._tac_size = 0.0
                     self._waterfall_triggered = False; self._days_above_dema = 0
                     self._on_trade_closed(self.equity - getattr(self, "_eq_snapshot", self.equity))
                     return
 
             # Tiered giveback guard for bear core
             if self._check_short_giveback_guard(self._bear_core_entry_price, bc_sl):
-                self._close_all()
+                self._close_layer(self._bear_core_size)
                 self._bear_core_active = False
                 self._bear_core_size = 0.0
-                self._tac_direction = 0; self._tac_size = 0.0
                 pnl = self.equity - getattr(self, "_eq_snapshot", self.equity)
                 self._on_trade_closed(pnl)
                 return
@@ -2150,10 +2435,9 @@ class DualLayerStrategy(BaseRiskStrategy):
                     current_r = (self._bear_core_entry_price - self._at("Close")) / risk
                     lock_r = getattr(self, '_waterfall_lock_r', 1.0)
                     if current_r < lock_r * 0.5:
-                        self._close_all()
+                        self._close_layer(self._bear_core_size)
                         self._bear_core_active = False
                         self._bear_core_size = 0.0
-                        self._tac_direction = 0
                         self._tac_size = 0.0
                         self._waterfall_triggered = False
                         self._days_above_dema = 0
@@ -2162,15 +2446,31 @@ class DualLayerStrategy(BaseRiskStrategy):
                         return
 
         if self._bear_core_active and self._bear_core_exit_signal():
-            self._close_all()
+            self._close_layer(self._bear_core_size)
             self._bear_core_active = False
             self._bear_core_size = 0.0
-            self._tac_direction = 0
             self._tac_size = 0.0
             self._days_above_dema = 0
             pnl = self.equity - getattr(self, "_eq_snapshot", self.equity)
             self._on_trade_closed(pnl)
             return
+
+        # ── Flash crash detection (rapid >5% drop = liquidity grab) ──
+        _df = self.data.df
+        high_6 = float(_df["High"].iloc[max(0,i-5):i+1].max())
+        drop_pct = (self._at("Close") / high_6 - 1)
+        atr_now = self._at("_atr")
+        atr_sma20 = float(_df["_atr"].iloc[max(0,i-19):i+1].mean()) if i >= 5 else atr_now
+        flash_crash = drop_pct < -0.05 and atr_now > 1.8 * atr_sma20
+        if flash_crash and not getattr(self, '_flash_crash_active', False):
+            self._flash_crash_active = True
+            self._flash_crash_bar = i
+        # Flash crash recovery: price back above 50% of drop, or 12 bars passed
+        if getattr(self, '_flash_crash_active', False):
+            recovery = self._at("Close") > high_6 * 0.97  # within 3% of pre-crash high
+            timeout = i - getattr(self, '_flash_crash_bar', i) > 12
+            if recovery or timeout:
+                self._flash_crash_active = False
 
         # ── Bear core probe peak R tracker + waterfall guard ──
         if self._bear_core_active:
@@ -2211,7 +2511,24 @@ class DualLayerStrategy(BaseRiskStrategy):
             self._core_size = rcfg.risk_core_alloc
             self._days_below_dema = 0
             self._eq_snapshot = self.equity
-            self._enter_long(self._core_size, tag="core")
+            # Core long: NO hard SL — uses manual trend-failure exit only.
+            # Flash crashes (liquidity grabs) must not shake out strategic longs.
+            self._enter_long(self._core_size, tag="core_long")
+            self._last_trade_bar = i
+
+        # ── Flash crash dip-buy (tactical long add-on) ──
+        if (getattr(self, '_flash_crash_active', False) and self._core_active
+                and self._tac_direction == 0 and cooldown_ok and not paused):
+            # Small tactical long to capture the bounce
+            dip_size = 0.10  # 10% equity dip-buy
+            self._tac_direction = 1
+            self._tac_entry_price = self._at("Close")
+            self._tac_sl = self._tac_entry_price * 0.92  # 8% hard stop
+            self._tac_tp = self._tac_entry_price * 1.08  # 8% target
+            self._tac_size = dip_size
+            self._tac_entry_bar = i
+            self._tac_module = "dip_buy"
+            self._enter_long(self._tac_size, tag="dip_buy_long", sl=self._tac_sl, tp=self._tac_tp)
             self._last_trade_bar = i
 
         # ── Core add-on (pullback in bull) ──
@@ -2220,7 +2537,7 @@ class DualLayerStrategy(BaseRiskStrategy):
         if self._core_active and not getattr(self, "_core_fully_loaded", True) and self._core_add_signal():
             add_size = (rcfg.core_allocation - self._core_size) * max_pos
             if add_size > 0.001:
-                self._enter_long(add_size, tag="core_add")
+                self._enter_long(add_size, tag="core_add_long")
                 self._core_size = rcfg.risk_core_alloc
                 self._core_fully_loaded = True
 
@@ -2320,12 +2637,18 @@ class DualLayerStrategy(BaseRiskStrategy):
                         self._tac_sl = sl
                         self._tac_tp = tp
                         # Module-specific risk: breakout 0.65%, pullback 0.50%, meanrev 0.25%
-                        mod_risk = {'breakout': rcfg.risk_breakout,
-                                    'crash': rcfg.risk_breakout,
-                                    'pullback': rcfg.risk_pullback,
-                                    'failed_bounce': rcfg.risk_pullback,
-                                    'bull_trap': rcfg.risk_pullback,
-                                    'meanrev': rcfg.risk_meanrev}.get(_module, rcfg.risk_per_trade)
+                        _full_tag = f"{_module}_long" if is_long else f"{_module}_short"
+                        mod_risk = {'breakout_retest_long': rcfg.risk_breakout,
+                                    'breakout_retest_short': rcfg.risk_breakout,
+                                    'crash_short': rcfg.risk_breakout,
+                                    'pullback_struct_long': rcfg.risk_pullback,
+                                    'pullback_struct_short': rcfg.risk_pullback,
+                                    'failed_bounce_short': rcfg.risk_pullback,
+                                    'bull_trap_short': rcfg.risk_pullback,
+                                    'meanrev_range_long': rcfg.risk_meanrev,
+                                    'meanrev_range_short': rcfg.risk_meanrev,
+                                    'sweep_reversal_long': rcfg.risk_meanrev,  # tight SL, small risk
+                                    'sweep_reversal_short': rcfg.risk_meanrev}.get(_full_tag, rcfg.risk_per_trade)
                         self._tac_size = mod_risk / (abs(entry - sl) / entry)
                         self._tac_size = min(self._tac_size, 0.99)
                         if not is_long:
@@ -2334,9 +2657,9 @@ class DualLayerStrategy(BaseRiskStrategy):
                         self._tac_extreme = entry
                         self._last_trade_bar = i
                         if is_long:
-                            self._enter_long(self._tac_size, tag=_module, sl=sl, tp=tp)
+                            self._enter_long(self._tac_size, tag=f"{_module}_long", sl=sl, tp=tp)
                         else:
-                            self._enter_short(self._tac_size, tag=_module, sl=sl, tp=tp)
+                            self._enter_short(self._tac_size, tag=f"{_module}_short", sl=sl, tp=tp)
 
 
 class WeightedSignalStrategy(Strategy):

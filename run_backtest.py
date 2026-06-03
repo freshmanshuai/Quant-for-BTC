@@ -7,8 +7,9 @@ import pandas as pd
 
 from quant_btc.attribution import analyze as attr_analyze, format_report as attr_format
 from quant_btc.config import BacktestConfig, RiskConfig
-from quant_btc.data import DataFetchError, fetch_derivative_data, fetch_ohlcv
-from quant_btc.strategy import compute_derivative_bonus
+from quant_btc.data import DataFetchError, fetch_derivative_data, fetch_ohlcv, load_mtf_data
+from quant_btc.strategy import DualLayerStrategy, compute_derivative_bonus
+from quant_btc.trade_log import extract_trade_log, print_trade_summary
 from quant_btc.report import generate_report
 from quant_btc.strategy import (
     STRATEGY_MAP,
@@ -181,27 +182,29 @@ def main():
         os.environ.setdefault("HTTPS_PROXY", proxy_url)
         os.environ.setdefault("ALL_PROXY", proxy_url)
 
-    print(f"Fetching {cfg.symbol} {cfg.timeframe} history from {args.exchange} ({args.market_type}) (limit={args.limit})...")
+    print(f"Fetching {cfg.symbol} {cfg.timeframe} + 15m history from {args.exchange} ({args.market_type})...")
     print(f"Proxy: {proxy_url}")
 
     try:
-        raw = fetch_ohlcv(
-            symbol=cfg.symbol,
-            timeframe=cfg.timeframe,
-            limit=cfg.limit,
-            market_type=args.market_type,
-            exchange_id=args.exchange,
-            timeout_ms=args.timeout_ms,
-            max_retries=args.max_retries,
-            proxy_url=proxy_url,
-            refresh=args.refresh_data,
+        mtf = load_mtf_data(
+            symbol=cfg.symbol, timeframes=("4h", "15m"),
+            market_type=args.market_type, exchange_id=args.exchange,
+            proxy_url=proxy_url, refresh=args.refresh_data,
         )
+        raw = mtf["4h"]
+        raw_15m = mtf.get("15m")
     except DataFetchError as exc:
         print(f"\n[Data Error] {exc}")
         print("Hint: check proxy, --timeout-ms, --max-retries, or try --exchange binanceus")
         return
 
-    print(f"Fetched {len(raw)} bars ({raw.index[0]} -> {raw.index[-1]})")
+    # Pass 15m data to DualLayerStrategy for MTF confirmation
+    if raw_15m is not None and len(raw_15m) > 0:
+        DualLayerStrategy._mtf_15m = raw_15m
+        print(f"Fetched 4H: {len(raw)} bars, 15m: {len(raw_15m)} bars ({raw_15m.index[0]} -> {raw_15m.index[-1]})")
+    else:
+        DualLayerStrategy._mtf_15m = None
+        print(f"Fetched {len(raw)} bars ({raw.index[0]} -> {raw.index[-1]})")
 
     if args.compare:
         # Run all three strategies
@@ -235,10 +238,14 @@ def main():
         report_str = generate_report(stats, bt, output_dir=str(run_dir))
         print(report_str)
 
-        # Attribution for dual-layer
+        # Attribution + Trade Log for dual-layer
         if args.strategy == "dual":
             attr = attr_analyze(stats, raw)
             print(attr_format(attr))
+            # Generate trade-by-trade audit log
+            entries, csv_path = extract_trade_log(stats, raw, str(run_dir), f"run_{run_dir.name}")
+            print_trade_summary(entries, max_rows=30)
+            print(f"\n  Full trade log saved to: {csv_path}")
 
 
 if __name__ == "__main__":

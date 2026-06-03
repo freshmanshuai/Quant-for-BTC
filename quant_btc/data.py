@@ -245,6 +245,35 @@ def fetch_ohlcv(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Multi-timeframe data loading
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def load_mtf_data(
+    symbol: str = "BTC/USDT",
+    timeframes: tuple[str, ...] = ("4h", "15m"),
+    market_type: MarketType = "swap",
+    exchange_id: str = "binance",
+    proxy_url: str | None = None,
+    refresh: bool = False,
+) -> dict[str, pd.DataFrame]:
+    """Load OHLCV data for multiple timeframes with caching.
+
+    Returns ``{"4h": df_4h, "15m": df_15m}``.
+    """
+    result = {}
+    for tf in timeframes:
+        # 15m needs more bars to cover the same time range
+        limit = 50000 if tf == "4h" else 100000
+        result[tf] = fetch_ohlcv(
+            symbol=symbol, timeframe=tf, limit=limit,
+            market_type=market_type, exchange_id=exchange_id,
+            proxy_url=proxy_url, refresh=refresh,
+        )
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Derivative data (funding rate + open interest) — optional, short-only bonus
 # ═══════════════════════════════════════════════════════════════════════════════
 
