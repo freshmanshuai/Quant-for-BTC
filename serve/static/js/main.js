@@ -13,6 +13,8 @@ function switchModule(name) {
   if (name === 'ohlcv') initOHLCV();
   if (name === 'returns') initReturns();
   if (name === 'orders') initOrders();
+  if (name === 'pipeline') initPipeline();
+  if (name === 'valuescan') initValuescan();
 }
 
 document.querySelectorAll('.nav-item').forEach(item => {

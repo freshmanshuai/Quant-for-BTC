@@ -30,6 +30,7 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 
 .chart-container { width: 100%; height: 520px; background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; }
 .chart-container-short { width: 100%; height: 300px; background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; }
+.chart-fallback { height: 100%; display: flex; align-items: center; justify-content: center; color: var(--text2); font-size: 13px; }
 
 .summary-cards { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
 .summary-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 12px 16px; min-width: 140px; }
@@ -58,3 +59,44 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 #orders-table tr.win { background: rgba(63,185,80,.06); }
 #orders-table tr.loss { background: rgba(248,81,73,.06); }
 #orders-table tr:hover { background: rgba(255,255,255,.04); }
+
+.ai-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.ai-toolbar input { width: 88px; background: var(--bg2); color: var(--text); border: 1px solid var(--border); padding: 5px 8px; border-radius: 4px; font-size: 13px; text-transform: uppercase; }
+.ai-toolbar button { background: var(--accent); color: #fff; border: 1px solid var(--accent); padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+#vs-status { color: var(--text2); font-size: 12px; min-width: 120px; text-align: right; }
+
+.ai-grid { display: grid; grid-template-columns: minmax(240px, .9fr) minmax(320px, 1.2fr) minmax(260px, 1fr); gap: 16px; margin-bottom: 16px; }
+.ai-grid.wide { grid-template-columns: repeat(3, minmax(260px, 1fr)); }
+.ai-grid.stream-grid { grid-template-columns: minmax(420px, 1fr) minmax(360px, .8fr); }
+.pipeline-grid { display: grid; grid-template-columns: repeat(2, minmax(320px, 1fr)); gap: 16px; margin-bottom: 16px; }
+.ai-panel { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 12px; min-width: 0; }
+.panel-title { color: var(--text2); font-size: 13px; font-weight: 600; margin-bottom: 10px; }
+.table-wrap.compact { max-height: 310px; overflow: auto; }
+.ai-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.ai-table th { color: var(--text2); font-weight: 600; text-align: left; border-bottom: 1px solid var(--border); padding: 7px 8px; white-space: nowrap; }
+.ai-table td { border-bottom: 1px solid rgba(48,54,61,.7); padding: 7px 8px; white-space: nowrap; }
+.ai-table tr:hover { background: rgba(255,255,255,.04); }
+
+.sentiment-row { margin-bottom: 10px; }
+.sentiment-label { display: flex; justify-content: space-between; color: var(--text2); font-size: 12px; margin-bottom: 4px; }
+.sentiment-track { height: 8px; background: var(--bg); border-radius: 4px; overflow: hidden; }
+.sentiment-fill { height: 100%; border-radius: 4px; }
+.sentiment-fill.bull { background: var(--green); }
+.sentiment-fill.neutral { background: var(--yellow); }
+.sentiment-fill.bear { background: var(--red); }
+.note-list { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.note-item { color: var(--text); background: rgba(255,255,255,.03); border-left: 2px solid var(--border); padding: 8px 9px; font-size: 12px; line-height: 1.45; }
+
+.analysis-list, .stream-feed { display: flex; flex-direction: column; gap: 10px; max-height: 360px; overflow-y: auto; }
+.analysis-item, .stream-item { background: rgba(255,255,255,.03); border: 1px solid rgba(48,54,61,.8); border-radius: 4px; padding: 10px; }
+.analysis-meta, .stream-meta { color: var(--text2); font-size: 11px; margin-bottom: 6px; }
+.analysis-content, .stream-content { color: var(--text); font-size: 12px; line-height: 1.5; white-space: pre-wrap; }
+.score-positive { color: var(--green); font-weight: 600; }
+.score-negative { color: var(--red); font-weight: 600; }
+.score-neutral { color: var(--yellow); font-weight: 600; }
+
+@media (max-width: 1100px) {
+  .ai-grid, .ai-grid.wide, .ai-grid.stream-grid { grid-template-columns: 1fr; }
+  .pipeline-grid { grid-template-columns: 1fr; }
+  #content { padding: 14px; }
+}

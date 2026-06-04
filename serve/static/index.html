@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>VISUALIZATION — BTC Quant System</title>
-<link rel="stylesheet" href="css/dashboard.css">
+<title>VISUALIZATION - BTC Quant System</title>
+<link rel="stylesheet" href="css/dashboard.css?v=4">
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 </head>
 <body>
@@ -20,6 +20,12 @@
       </li>
       <li class="nav-item active" data-module="orders">
         <span class="nav-icon">☷</span> Trade Orders
+      </li>
+      <li class="nav-item" data-module="pipeline">
+        <span class="nav-icon">SP</span> Signal Pipeline
+      </li>
+      <li class="nav-item" data-module="valuescan">
+        <span class="nav-icon">AI</span> AI Tracking
       </li>
     </ul>
     <div class="sidebar-footer" id="sidebar-summary">
@@ -95,12 +101,200 @@
         </table>
       </div>
     </section>
+    <!-- Module: Signal Pipeline -->
+    <section id="module-pipeline" class="module">
+      <div class="module-header">
+        <h2>Signal Pipeline</h2>
+        <div class="ai-toolbar">
+          <select id="pipeline-timeframe" aria-label="Timeframe">
+            <option value="4h">4h</option>
+            <option value="1h">1h</option>
+            <option value="15m">15m</option>
+          </select>
+          <input id="pipeline-equity" value="10000" inputmode="decimal" aria-label="Equity">
+          <button id="pipeline-refresh">Refresh</button>
+          <span id="pipeline-status">Idle</span>
+        </div>
+      </div>
+
+      <div class="summary-cards" id="pipeline-summary-cards"></div>
+
+      <div class="pipeline-grid">
+        <div class="ai-panel">
+          <div class="panel-title">Signals</div>
+          <div class="table-wrap compact">
+            <table class="ai-table">
+              <thead><tr><th>Module</th><th>Dir</th><th>Score</th><th>Stop</th><th>Target</th></tr></thead>
+              <tbody id="pipeline-signal-rows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="ai-panel">
+          <div class="panel-title">Risk Decisions</div>
+          <div class="table-wrap compact">
+            <table class="ai-table">
+              <thead><tr><th>Module</th><th>Allowed</th><th>Qty</th><th>Risk</th><th>Reason</th></tr></thead>
+              <tbody id="pipeline-risk-rows"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="pipeline-grid">
+        <div class="ai-panel">
+          <div class="panel-title">Portfolio Orders</div>
+          <div class="table-wrap compact">
+            <table class="ai-table">
+              <thead><tr><th>Action</th><th>Symbol</th><th>Layer</th><th>Dir</th><th>Entry</th><th>Stop</th><th>Target</th><th>Status</th></tr></thead>
+              <tbody id="pipeline-order-rows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="ai-panel">
+          <div class="panel-title">Delivery Payloads</div>
+          <div id="pipeline-delivery-feed" class="stream-feed"></div>
+        </div>
+      </div>
+
+      <div class="summary-cards" id="pipeline-backtest-summary-cards"></div>
+
+      <div class="pipeline-grid">
+        <div class="ai-panel">
+          <div class="panel-title">Event Trades</div>
+          <div class="table-wrap compact">
+            <table class="ai-table">
+              <thead><tr><th>Module</th><th>Exit</th><th>Qty</th><th>Gross</th><th>Net</th></tr></thead>
+              <tbody id="pipeline-backtest-trade-rows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="ai-panel">
+          <div class="panel-title">Event Equity</div>
+          <div id="pipeline-equity-feed" class="stream-feed"></div>
+        </div>
+      </div>
+
+      <div class="pipeline-grid">
+        <div class="ai-panel">
+          <div class="panel-title">Event Attribution</div>
+          <div class="table-wrap compact">
+            <table class="ai-table">
+              <thead><tr><th>Group</th><th>Key</th><th>Trades</th><th>Net</th><th>Win</th></tr></thead>
+              <tbody id="pipeline-backtest-attribution-rows"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="summary-cards" id="pipeline-comparison-summary-cards"></div>
+
+      <div class="pipeline-grid">
+        <div class="ai-panel">
+          <div class="panel-title">Migration Comparison</div>
+          <div class="table-wrap compact">
+            <table class="ai-table">
+              <thead><tr><th>Metric</th><th>Legacy</th><th>Event</th><th>Delta</th></tr></thead>
+              <tbody id="pipeline-comparison-rows"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+    <!-- Module: Valuescan AI Tracking -->
+    <section id="module-valuescan" class="module">
+      <div class="module-header">
+        <h2>Valuescan AI Tracking</h2>
+        <div class="ai-toolbar">
+          <input id="vs-token-input" value="BTC" maxlength="12" aria-label="Token symbol">
+          <button id="vs-refresh">Refresh</button>
+          <span id="vs-status">Idle</span>
+        </div>
+      </div>
+
+      <div class="summary-cards" id="vs-summary-cards"></div>
+
+      <div class="ai-grid">
+        <div class="ai-panel">
+          <div class="panel-title">Support / Resistance</div>
+          <div class="table-wrap compact">
+            <table class="ai-table">
+              <thead><tr><th>Price</th><th>Area</th></tr></thead>
+              <tbody id="vs-dense-rows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="ai-panel">
+          <div class="panel-title">Whale Trend</div>
+          <div id="vs-trend-chart" class="chart-container-short"></div>
+        </div>
+        <div class="ai-panel">
+          <div class="panel-title">Social Sentiment</div>
+          <div id="vs-sentiment-bars"></div>
+          <div id="vs-sentiment-notes" class="note-list"></div>
+        </div>
+      </div>
+
+      <div class="ai-grid wide">
+        <div class="ai-panel">
+          <div class="panel-title">Opportunity Tokens</div>
+          <div class="table-wrap compact">
+            <table class="ai-table">
+              <thead><tr><th>Symbol</th><th>Score</th><th>Grade</th><th>24h</th></tr></thead>
+              <tbody id="vs-opportunity-rows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="ai-panel">
+          <div class="panel-title">Risk Tokens</div>
+          <div class="table-wrap compact">
+            <table class="ai-table">
+              <thead><tr><th>Symbol</th><th>Score</th><th>Grade</th><th>24h</th></tr></thead>
+              <tbody id="vs-risk-rows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="ai-panel">
+          <div class="panel-title">Fund Anomalies</div>
+          <div class="table-wrap compact">
+            <table class="ai-table">
+              <thead><tr><th>Symbol</th><th>Trade</th><th>Updated</th></tr></thead>
+              <tbody id="vs-funds-rows"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="ai-grid stream-grid">
+        <div class="ai-panel">
+          <div class="panel-title">Market Analysis</div>
+          <div id="vs-market-analysis" class="analysis-list"></div>
+        </div>
+        <div class="ai-panel">
+          <div class="panel-title">Live Push</div>
+          <div id="vs-stream-feed" class="stream-feed"></div>
+        </div>
+      </div>
+
+      <div class="ai-grid">
+        <div class="ai-panel">
+          <div class="panel-title">Research Features</div>
+          <div class="table-wrap compact">
+            <table class="ai-table">
+              <thead><tr><th>Feature</th><th>Latest</th></tr></thead>
+              <tbody id="vs-feature-rows"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
   </main>
 </div>
 
-<script src="js/main.js?v=3"></script>
 <script src="js/chart_ohlcv.js?v=3"></script>
 <script src="js/returns.js?v=3"></script>
 <script src="js/orders.js?v=3"></script>
+<script src="js/pipeline.js?v=1"></script>
+<script src="js/valuescan.js?v=3"></script>
+<script src="js/main.js?v=4"></script>
 </body>
 </html>

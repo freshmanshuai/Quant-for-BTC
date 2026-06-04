@@ -1,0 +1,19 @@
+{
+  "default": {
+    "trend_ema_length": 169,
+    "daily_rule": "1D",
+    "weekly_rule": "1W",
+    "ema_slope_threshold": 0.001
+  },
+  "profiles": [
+    {
+      "exchange": "nasdaq",
+      "market_type": "equity",
+      "trend_ema_length": 50,
+      "daily_rule": "1D",
+      "weekly_rule": "1W-FRI",
+      "ema_slope_threshold": 0.0005,
+      "high_vol_atr_pct": 0.85
+    }
+  ]
+}

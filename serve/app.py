@@ -8,9 +8,18 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+import json
 import math
+import time
 import pandas as pd
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory
+from quant_platform.data import ExternalMetricSeriesId
+from quant_platform.stores import MissingStorageDependency, ParquetExternalMetricStore
+from serve.valuescan_client import ValuescanAPIError, ValuescanClient, ValuescanConfigError
+from serve.valuescan_metrics import cache_valuescan_external_metrics, valuescan_feature_preview_payload
+
+
+_EXTERNAL_METRIC_STORE_DIR = _PROJECT_ROOT / "data" / "external_metrics"
 
 
 def _safe_float(v, default=0.0):
@@ -28,10 +37,35 @@ from serve.data_loader import (
     get_summary_stats,
     get_trade_log,
 )
+from serve.signal_preview import (
+    get_btc_event_backtest_preview,
+    get_btc_migration_comparison_preview,
+    get_btc_pipeline_preview,
+    get_btc_signal_preview,
+    get_signal_research_preview,
+)
+
+
+def _load_research_preview_ohlcv(timeframe, market):
+    if market.asset.symbol == "BTC/USDT" and market.exchange == "binance" and market.market_type == "swap":
+        return get_ohlcv(timeframe)
+    return pd.DataFrame()
 
 
 def create_app():
     app = Flask(__name__, static_folder="static", static_url_path="")
+
+    def _valuescan_error(exc: Exception, status: int):
+        if isinstance(exc, ValuescanConfigError):
+            return jsonify({"error": "valuescan_not_configured", "message": str(exc)}), 503
+        return jsonify({"error": "valuescan_request_failed", "message": str(exc)}), status
+
+    def _safe_valuescan_call(errors: dict[str, str], key: str, fn, fallback):
+        try:
+            return fn()
+        except (ValuescanAPIError, OSError, ValueError) as exc:
+            errors[key] = str(exc)
+            return fallback
 
     # ── OHLCV API ──
 
@@ -199,7 +233,245 @@ def create_app():
             "exit_reasons": sorted(trades["exit_reason"].dropna().unique().tolist()),
         })
 
+    # Standardized Signal API
+
+    @app.route("/api/signals/preview")
+    def signals_preview():
+        timeframe = request.args.get("timeframe", "4h")
+        symbol = request.args.get("symbol", "BTC/USDT")
+        limit = max(1, min(int(request.args.get("limit", 50)), 500))
+        try:
+            return jsonify(get_btc_signal_preview(timeframe=timeframe, symbol=symbol, limit=limit))
+        except ModuleNotFoundError as exc:
+            return jsonify({
+                "error": "signal_preview_unavailable",
+                "message": f"Missing runtime dependency: {exc.name}",
+            }), 503
+
+    @app.route("/api/signals/pipeline-preview")
+    def signals_pipeline_preview():
+        timeframe = request.args.get("timeframe", "4h")
+        symbol = request.args.get("symbol", "BTC/USDT")
+        equity = max(1.0, float(request.args.get("equity", 10_000)))
+        try:
+            return jsonify(get_btc_pipeline_preview(timeframe=timeframe, symbol=symbol, equity=equity))
+        except ModuleNotFoundError as exc:
+            return jsonify({
+                "error": "signal_pipeline_preview_unavailable",
+                "message": f"Missing runtime dependency: {exc.name}",
+            }), 503
+
     # ── Static files ──
+
+    @app.route("/api/signals/research-preview")
+    def signals_research_preview():
+        timeframe = request.args.get("timeframe", "4h")
+        symbol = request.args.get("symbol", "BTC/USDT")
+        exchange = request.args.get("exchange", "binance")
+        market_type = request.args.get("market_type", "swap")
+        equity = max(1.0, float(request.args.get("equity", 10_000)))
+        try:
+            return jsonify(get_signal_research_preview(
+                timeframe=timeframe,
+                symbol=symbol,
+                exchange=exchange,
+                market_type=market_type,
+                equity=equity,
+                load_ohlcv=_load_research_preview_ohlcv,
+            ))
+        except ModuleNotFoundError as exc:
+            return jsonify({
+                "error": "signal_research_preview_unavailable",
+                "message": f"Missing runtime dependency: {exc.name}",
+            }), 503
+
+    @app.route("/api/signals/event-backtest-preview")
+    def signals_event_backtest_preview():
+        timeframe = request.args.get("timeframe", "4h")
+        symbol = request.args.get("symbol", "BTC/USDT")
+        equity = max(1.0, float(request.args.get("equity", 10_000)))
+        try:
+            return jsonify(get_btc_event_backtest_preview(timeframe=timeframe, symbol=symbol, equity=equity))
+        except ModuleNotFoundError as exc:
+            return jsonify({
+                "error": "signal_event_backtest_preview_unavailable",
+                "message": f"Missing runtime dependency: {exc.name}",
+            }), 503
+
+    @app.route("/api/signals/migration-comparison-preview")
+    def signals_migration_comparison_preview():
+        timeframe = request.args.get("timeframe", "4h")
+        symbol = request.args.get("symbol", "BTC/USDT")
+        equity = max(1.0, float(request.args.get("equity", 10_000)))
+        try:
+            return jsonify(get_btc_migration_comparison_preview(timeframe=timeframe, symbol=symbol, equity=equity))
+        except ModuleNotFoundError as exc:
+            return jsonify({
+                "error": "signal_migration_comparison_preview_unavailable",
+                "message": f"Missing runtime dependency: {exc.name}",
+            }), 503
+
+    # Valuescan AI Tracking API
+
+    @app.route("/api/valuescan/ai/overview")
+    def valuescan_ai_overview():
+        token_symbol = request.args.get("token", "BTC").upper()
+        now_ms = int(time.time() * 1000)
+        lookback_days = max(1, min(int(request.args.get("days", 7)), 30))
+        start_ms = now_ms - lookback_days * 24 * 60 * 60 * 1000
+        client = ValuescanClient()
+        try:
+            token = client.resolve_token(token_symbol)
+            token_id = token.get("id") or token.get("vsTokenId")
+            errors: dict[str, str] = {}
+            return jsonify({
+                "token": {
+                    "vsTokenId": token_id,
+                    "symbol": token.get("symbol", token_symbol),
+                    "name": token.get("name", ""),
+                },
+                "supportResistance": _safe_valuescan_call(errors, "supportResistance", lambda: client.support_resistance(token_id, now_ms).get("data") or [], []),
+                "priceMarket": _safe_valuescan_call(errors, "priceMarket", lambda: client.price_market(token_id, start_ms, now_ms).get("data") or [], []),
+                "socialSentiment": _safe_valuescan_call(errors, "socialSentiment", lambda: client.social_sentiment(token_id).get("data") or {}, {}),
+                "marketAnalysis": _safe_valuescan_call(errors, "marketAnalysis", lambda: client.market_analysis_history(page=1, page_size=8).get("data") or [], []),
+                "errors": errors,
+                "updatedAt": now_ms,
+            })
+        except ValuescanConfigError as exc:
+            return _valuescan_error(exc, 503)
+        except (ValuescanAPIError, OSError, ValueError) as exc:
+            return _valuescan_error(exc, 502)
+
+    @app.route("/api/valuescan/ai/lists")
+    def valuescan_ai_lists():
+        client = ValuescanClient()
+        try:
+            errors: dict[str, str] = {}
+            opportunities = _safe_valuescan_call(errors, "opportunities", lambda: client.chance_coin_list().get("data") or [], [])
+            risks = _safe_valuescan_call(errors, "risks", lambda: client.risk_coin_list().get("data") or [], [])
+            funds = _safe_valuescan_call(errors, "funds", lambda: client.funds_coin_list().get("data") or [], [])
+            first_opportunity = opportunities[0] if opportunities else {}
+            first_risk = risks[0] if risks else {}
+            first_funds = funds[0] if funds else {}
+            return jsonify({
+                "opportunities": opportunities,
+                "risks": risks,
+                "funds": funds,
+                "messages": {
+                    "opportunities": _safe_valuescan_call(errors, "opportunityMessages", lambda: client.chance_coin_messages(first_opportunity.get("vsTokenId")).get("data") or [], [])
+                    if first_opportunity.get("vsTokenId") else [],
+                    "risks": _safe_valuescan_call(errors, "riskMessages", lambda: client.risk_coin_messages(first_risk.get("vsTokenId")).get("data") or [], [])
+                    if first_risk.get("vsTokenId") else [],
+                    "funds": _safe_valuescan_call(errors, "fundMessages", lambda: client.funds_coin_messages(first_funds.get("vsTokenId"), first_funds.get("tradeType", 1)).get("data") or [], [])
+                    if first_funds.get("vsTokenId") else [],
+                },
+                "errors": errors,
+                "updatedAt": int(time.time() * 1000),
+            })
+        except ValuescanConfigError as exc:
+            return _valuescan_error(exc, 503)
+        except (ValuescanAPIError, OSError, ValueError) as exc:
+            return _valuescan_error(exc, 502)
+
+    @app.route("/api/valuescan/ai/features")
+    def valuescan_ai_features():
+        token_symbol = request.args.get("token", "BTC").upper()
+        timeframe = request.args.get("timeframe", "4h")
+        limit = max(1, min(int(request.args.get("limit", 5)), 50))
+        now_ms = int(time.time() * 1000)
+        lookback_days = max(1, min(int(request.args.get("days", 7)), 30))
+        start_ms = now_ms - lookback_days * 24 * 60 * 60 * 1000
+        client = ValuescanClient()
+        try:
+            bars = get_ohlcv(timeframe)
+            token = client.resolve_token(token_symbol)
+            token_id = token.get("id") or token.get("vsTokenId")
+            errors: dict[str, str] = {}
+            overview_payload = {
+                "token": {
+                    "vsTokenId": token_id,
+                    "symbol": token.get("symbol", token_symbol),
+                    "name": token.get("name", ""),
+                },
+                "supportResistance": _safe_valuescan_call(errors, "supportResistance", lambda: client.support_resistance(token_id, now_ms).get("data") or [], []),
+                "priceMarket": _safe_valuescan_call(errors, "priceMarket", lambda: client.price_market(token_id, start_ms, now_ms).get("data") or [], []),
+                "socialSentiment": _safe_valuescan_call(errors, "socialSentiment", lambda: client.social_sentiment(token_id).get("data") or {}, {}),
+                "marketAnalysis": _safe_valuescan_call(errors, "marketAnalysis", lambda: client.market_analysis_history(page=1, page_size=8).get("data") or [], []),
+                "updatedAt": now_ms,
+            }
+            opportunities = _safe_valuescan_call(errors, "opportunities", lambda: client.chance_coin_list().get("data") or [], [])
+            risks = _safe_valuescan_call(errors, "risks", lambda: client.risk_coin_list().get("data") or [], [])
+            funds = _safe_valuescan_call(errors, "funds", lambda: client.funds_coin_list().get("data") or [], [])
+            matching_opportunity = next((row for row in opportunities if str(row.get("symbol", "")).upper() == token_symbol), {})
+            matching_risk = next((row for row in risks if str(row.get("symbol", "")).upper() == token_symbol), {})
+            matching_funds = next((row for row in funds if str(row.get("symbol", "")).upper() == token_symbol), {})
+            lists_payload = {
+                "opportunities": opportunities,
+                "risks": risks,
+                "funds": funds,
+                "messages": {
+                    "opportunities": _safe_valuescan_call(errors, "opportunityMessages", lambda: client.chance_coin_messages(matching_opportunity.get("vsTokenId")).get("data") or [], [])
+                    if matching_opportunity.get("vsTokenId") else [],
+                    "risks": _safe_valuescan_call(errors, "riskMessages", lambda: client.risk_coin_messages(matching_risk.get("vsTokenId")).get("data") or [], [])
+                    if matching_risk.get("vsTokenId") else [],
+                    "funds": _safe_valuescan_call(errors, "fundMessages", lambda: client.funds_coin_messages(matching_funds.get("vsTokenId"), matching_funds.get("tradeType", 1)).get("data") or [], [])
+                    if matching_funds.get("vsTokenId") else [],
+                },
+                "updatedAt": now_ms,
+            }
+            payload = valuescan_feature_preview_payload(
+                bars,
+                overview_payload=overview_payload,
+                lists_payload=lists_payload,
+                symbol=token_symbol,
+                limit=limit,
+            )
+            series_id = ExternalMetricSeriesId(
+                symbol=token_symbol,
+                provider="valuescan",
+                dataset="ai_tracking",
+                timeframe=timeframe,
+                source="api",
+            )
+            try:
+                payload["cache"] = cache_valuescan_external_metrics(
+                    overview_payload=overview_payload,
+                    lists_payload=lists_payload,
+                    symbol=token_symbol,
+                    series_id=series_id,
+                    store=ParquetExternalMetricStore(_EXTERNAL_METRIC_STORE_DIR),
+                )
+            except (MissingStorageDependency, OSError, ValueError) as exc:
+                errors["externalMetricCache"] = str(exc)
+            payload["timeframe"] = timeframe
+            payload["errors"] = errors
+            return jsonify(payload)
+        except ValuescanConfigError as exc:
+            return _valuescan_error(exc, 503)
+        except (ValuescanAPIError, OSError, ValueError) as exc:
+            return _valuescan_error(exc, 502)
+
+    @app.route("/api/valuescan/ai/stream")
+    def valuescan_ai_stream():
+        channel = request.args.get("type", "market")
+        if channel not in {"market", "signal"}:
+            return jsonify({"error": "invalid_stream_type"}), 400
+        tokens = request.args.get("tokens", "")
+        client = ValuescanClient()
+
+        def generate():
+            try:
+                yield from client.stream_events(channel, tokens=tokens)
+            except ValuescanConfigError as exc:
+                data = json.dumps({"error": "valuescan_not_configured", "message": str(exc)}, ensure_ascii=False)
+                yield f"event: error\ndata: {data}\n\n"
+            except Exception as exc:
+                data = json.dumps({"error": "valuescan_stream_failed", "message": str(exc)}, ensure_ascii=False)
+                yield f"event: error\ndata: {data}\n\n"
+
+        return Response(generate(), mimetype="text/event-stream")
+
+    # Static files
 
     @app.route("/")
     def index():
@@ -209,4 +481,4 @@ def create_app():
 
 
 if __name__ == "__main__":
-    create_app().run(debug=True, host="0.0.0.0", port=5000)
+    create_app().run(debug=False, host="127.0.0.1", port=5000)

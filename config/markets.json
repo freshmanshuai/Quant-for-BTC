@@ -1,0 +1,27 @@
+{
+  "markets": [
+    {
+      "symbol": "BTC/USDT",
+      "base": "BTC",
+      "quote": "USDT",
+      "exchange": "binance",
+      "market_type": "swap",
+      "tick_size": 0.1,
+      "lot_size": 0.001,
+      "supports_short": true,
+      "supports_leverage": true
+    },
+    {
+      "symbol": "AAPL",
+      "base": "AAPL",
+      "quote": "USD",
+      "exchange": "nasdaq",
+      "market_type": "equity",
+      "tick_size": 0.01,
+      "lot_size": 0.001,
+      "trading_session": "US_REGULAR",
+      "supports_short": false,
+      "supports_leverage": false
+    }
+  ]
+}
