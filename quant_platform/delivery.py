@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import csv
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 from quant_platform.portfolio import PortfolioOrder
@@ -196,6 +199,17 @@ class PineGoldenVector:
             score=signal.score,
         )
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "PineGoldenVector":
+        return cls(
+            signal_key=str(data["signal_key"]),
+            bar_time=str(data["bar_time"]),
+            entry_price=float(data["entry_price"]),
+            stop_price=_optional_float(data.get("stop_price")),
+            target_price=_optional_float(data.get("target_price")),
+            score=float(data["score"]),
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "signal_key": self.signal_key,
@@ -214,6 +228,44 @@ class PineGoldenVector:
             f"target={self.target_price} "
             f"score={self.score}"
         )
+
+
+def write_pine_golden_vectors_json(path: str | Path, vectors: list[PineGoldenVector]) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    rows = [vector.to_dict() for vector in vectors]
+    target.write_text(json.dumps(rows, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def load_pine_golden_vectors_json(path: str | Path) -> list[PineGoldenVector]:
+    data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    if isinstance(data, dict):
+        data = data.get("vectors", [])
+    return [PineGoldenVector.from_dict(dict(row)) for row in data]
+
+
+def load_pine_observations(path: str | Path) -> list[dict[str, Any]]:
+    source = Path(path)
+    if source.suffix.lower() == ".csv":
+        with source.open("r", encoding="utf-8-sig", newline="") as handle:
+            return [dict(row) for row in csv.DictReader(handle)]
+    data = json.loads(source.read_text(encoding="utf-8-sig"))
+    if isinstance(data, dict):
+        return [dict(row) for row in data.get("observations", [])]
+    return [dict(row) for row in data]
+
+
+def compare_pine_golden_vector_files(
+    expected_path: str | Path,
+    observed_path: str | Path,
+    *,
+    tolerance: float = 1e-9,
+) -> list[str]:
+    return compare_pine_golden_vectors(
+        load_pine_golden_vectors_json(expected_path),
+        load_pine_observations(observed_path),
+        tolerance=tolerance,
+    )
 
 
 def compare_pine_golden_vectors(
@@ -251,6 +303,12 @@ def _values_match(expected: Any, actual: Any, tolerance: float) -> bool:
         return abs(float(expected) - float(actual)) <= tolerance
     except (TypeError, ValueError):
         return expected == actual
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    return float(value)
 
 
 def _plain_text_body(payload: DeliveryPayload) -> str:

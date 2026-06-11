@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 from quant_platform.signal_modules import ColumnSignalConfig, ColumnSignalModule, SignalModuleRunner
-from quant_platform.signals import Signal
+from quant_platform.signals import Direction, Signal
 
 
 def btc_mtf_sweep_reclaim(
@@ -55,6 +55,437 @@ def btc_mtf_higher_low_formed(bars: pd.DataFrame | None) -> bool:
                 if lows[i] > prev_swing:
                     return True
     return False
+
+
+def select_btc_base_entry_signal(
+    row: pd.Series,
+    *,
+    symbol: str,
+    module: str,
+    long_column: str,
+    short_column: str,
+    regime: int,
+    daily_ema_dir: float,
+    weekly_ema_dir: float,
+    allow_long: bool,
+    allow_short: bool,
+    score_threshold: float,
+    long_score_column: str | None = None,
+    short_score_column: str | None = None,
+    long_stop_column: str | None = None,
+    short_stop_column: str | None = None,
+    long_target_column: str | None = None,
+    short_target_column: str | None = None,
+) -> Signal | None:
+    """Select the BTC base-strategy entry as a standardized compatibility signal."""
+    long_score = _row_float(row, long_score_column or long_column)
+    short_score = _row_float(row, short_score_column or short_column)
+    is_long = _btc_base_entry_direction(
+        regime=regime,
+        daily_ema_dir=daily_ema_dir,
+        weekly_ema_dir=weekly_ema_dir,
+        allow_long=allow_long,
+        allow_short=allow_short,
+        long_score=long_score,
+        short_score=short_score,
+        score_threshold=score_threshold,
+    )
+    if is_long is None:
+        return None
+
+    if is_long:
+        direction = Direction.LONG
+        score = long_score
+        stop = _optional_row_float(row, long_stop_column)
+        target = _optional_row_float(row, long_target_column)
+    else:
+        direction = Direction.SHORT
+        score = short_score
+        stop = _optional_row_float(row, short_stop_column)
+        target = _optional_row_float(row, short_target_column)
+
+    return Signal(
+        module=module,
+        symbol=symbol,
+        direction=direction,
+        score=score,
+        entry_reason=f"{module} BTC compatibility entry",
+        invalidation="BTC compatibility exit and risk rules",
+        preferred_stop=stop,
+        preferred_target=target,
+        confidence=max(0.0, min(1.0, score / 100.0)),
+        required_data=("ohlcv:4h", "features:btc_compat"),
+    )
+
+
+def select_btc_weighted_legacy_signal(
+    row: pd.Series,
+    *,
+    symbol: str,
+    long_column: str = "long_entry",
+    short_column: str = "short_entry",
+) -> Signal | None:
+    """Select the simple weighted legacy entry as a standardized compatibility signal."""
+    if _row_bool(row, long_column):
+        direction = Direction.LONG
+    elif _row_bool(row, short_column):
+        direction = Direction.SHORT
+    else:
+        return None
+    return _btc_compat_signal(
+        symbol,
+        "legacy_weighted",
+        direction,
+        100.0,
+        entry_reason="legacy_weighted BTC compatibility entry",
+        invalidation="BTC weighted legacy opposite-signal exit",
+    )
+
+
+def select_btc_core_entry_signal(*, symbol: str, regime: int) -> Signal | None:
+    """Select the BTC core-long entry as a standardized compatibility signal."""
+    if regime != 1:
+        return None
+    return _btc_compat_signal(
+        symbol,
+        "core_long",
+        Direction.LONG,
+        100.0,
+        invalidation="BTC core compatibility exit and risk rules",
+        required_data=("ohlcv:4h", "regime:btc_compat"),
+    )
+
+
+def select_btc_flash_crash_dip_buy_signal(*, symbol: str, should_enter: bool) -> Signal | None:
+    """Select the BTC flash-crash dip-buy as a standardized compatibility signal."""
+    if not should_enter:
+        return None
+    return _btc_compat_signal(
+        symbol,
+        "dip_buy",
+        Direction.LONG,
+        80.0,
+        entry_reason="dip_buy BTC tactical compatibility entry",
+        invalidation="BTC tactical compatibility exit and risk rules",
+        required_data=("ohlcv:4h", "regime:btc_compat"),
+    )
+
+
+def select_btc_core_add_signal(
+    row: pd.Series,
+    *,
+    symbol: str,
+    pullback_column: str = "pullback_long",
+    score_column: str = "score_pullback_long",
+) -> Signal | None:
+    """Select the BTC core pullback add-on as a standardized compatibility signal."""
+    if not _row_bool(row, pullback_column):
+        return None
+    score = _optional_row_float(row, score_column)
+    if score is None:
+        score = 100.0
+    return _btc_compat_signal(
+        symbol,
+        "core_add",
+        Direction.LONG,
+        score,
+        invalidation="BTC core add compatibility exit and risk rules",
+    )
+
+
+def select_btc_bear_core_probe_signal(
+    row: pd.Series,
+    *,
+    symbol: str,
+    core_active: bool,
+    bear_core_active: bool,
+    score_threshold: float = 70.0,
+    top_score_column: str = "_top_exhaustion_score",
+    double_top_column: str = "_double_top_signal",
+    bull_guard_column: str = "_bull_guard",
+) -> Signal | None:
+    """Select the BTC bear-core stage-1 probe as a standardized compatibility signal."""
+    top_score = _row_float(row, top_score_column)
+    if (
+        core_active
+        or bear_core_active
+        or not _row_bool(row, double_top_column)
+        or top_score < score_threshold
+        or _row_bool(row, bull_guard_column)
+    ):
+        return None
+    return _btc_compat_signal(
+        symbol,
+        "bear_core_probe",
+        Direction.SHORT,
+        top_score,
+        invalidation="BTC bear-core compatibility exit and risk rules",
+    )
+
+
+def select_btc_bear_core_confirm_add_signal(
+    row: pd.Series,
+    *,
+    symbol: str,
+    bar_index: int,
+    entry_bar: int,
+    active: bool,
+    stage: int,
+    probe_peak_r: float,
+) -> Signal | None:
+    """Select the BTC bear-core stage-2 confirmation add as a standardized signal."""
+    if (
+        not active
+        or stage != 1
+        or bar_index <= entry_bar
+        or probe_peak_r < 1.0
+        or _row_float(row, "_d_ema_dir") >= 0
+        or _row_float(row, "_w_ema_dir") > 0
+        or _row_float(row, "Close") >= _row_float(row, "_w_ema_169")
+    ):
+        return None
+    return _btc_compat_signal(
+        symbol,
+        "bear_core_confirm",
+        Direction.SHORT,
+        80.0,
+        invalidation="BTC bear-core compatibility exit and risk rules",
+    )
+
+
+def select_btc_bear_core_acceleration_add_signal(
+    row: pd.Series,
+    *,
+    symbol: str,
+    bar_index: int,
+    last_trade_bar: int,
+    active: bool,
+    stage: int,
+) -> Signal | None:
+    """Select the BTC bear-core stage-3 acceleration add as a standardized signal."""
+    if (
+        not active
+        or stage != 2
+        or bar_index <= last_trade_bar
+        or _row_float(row, "_d_ema_dir") >= 0
+        or _row_float(row, "_adx_signal") <= 22
+        or _row_float(row, "_minus_di") <= _row_float(row, "_plus_di")
+    ):
+        return None
+    return _btc_compat_signal(
+        symbol,
+        "bear_core_acceleration",
+        Direction.SHORT,
+        85.0,
+        invalidation="BTC bear-core compatibility exit and risk rules",
+    )
+
+
+def select_btc_tactical_signal(
+    row: pd.Series,
+    *,
+    symbol: str,
+    regime: int,
+    daily_ema_dir: float,
+    weekly_ema_dir: float,
+    core_active: bool,
+    bear_core_active: bool,
+    short_rsi_floor: float,
+    mtf_no_new_extreme_long: bool = False,
+    mtf_no_new_extreme_short: bool = False,
+    mtf_higher_low: bool = False,
+) -> Signal | None:
+    """Select the BTC dual-layer tactical entry as a standardized compatibility signal."""
+    strong_bull = regime == 1
+    strong_bear = regime == 2
+    weak_bull = not strong_bull and daily_ema_dir >= 0 and weekly_ema_dir >= 0
+    ranging = regime == 0
+    compression = regime == 3
+
+    score_bo_retest_l = _row_float(row, "score_breakout_retest_long")
+    score_pb_struct_l = _row_float(row, "score_pullback_struct_long")
+    score_pb_struct_s = _row_float(row, "score_pullback_struct_short")
+    score_mr_range_l = _row_float(row, "score_meanrev_range_long")
+    score_sweep_l = _row_float(row, "score_sweep_reversal_long")
+    score_sweep_s = _row_float(row, "score_sweep_reversal_short")
+
+    deriv_bonus = _row_float(row, "_short_deriv_bonus")
+    pa_bonus = _row_float(row, "_price_action_bonus")
+    fb_bonus = 5.0 if _row_bool(row, "_failed_bounce_gate") else 0.0
+    perp_long_bonus = _row_float(row, "_perp_crowding_long_bonus")
+    score_pb_s = score_pb_struct_s + fb_bonus + deriv_bonus + pa_bonus
+    score_crash_s = _row_float(row, "score_crash_short") + deriv_bonus + pa_bonus
+    score_bt_s = _row_float(row, "score_bull_trap_short") + deriv_bonus + pa_bonus
+    bt_gate = _row_bool(row, "_bull_trap_signal")
+
+    bo_retest_th = 70.0
+    pb_struct_th = 70.0
+    mr_range_th = 75.0
+    sweep_th = 65.0
+    crash_th = 75.0
+    pb_th_s = 999.0
+    bt_th = 80.0
+
+    sweep_gate_l = _row_bool(row, "_sweep_signal_long")
+    sweep_gate_s = _row_bool(row, "_sweep_signal_short")
+    sweep_score_l = score_sweep_l + (10.0 if mtf_no_new_extreme_long else 0.0)
+    sweep_score_s = score_sweep_s + (10.0 if mtf_no_new_extreme_short else 0.0)
+    retest_score_l = score_bo_retest_l + (5.0 if mtf_higher_low else 0.0)
+    struct_score_l = score_pb_struct_l + (5.0 if mtf_higher_low else 0.0)
+
+    rsi_ok = _row_float(row, "rsi_14") >= short_rsi_floor
+    late_ok = not _row_bool(row, "_late_chase")
+    close_val = _row_float(row, "Close")
+    daily_ema = _row_float(row, "_d_ema_169")
+    bull_guard = _row_bool(row, "_bull_guard") or core_active
+    short_env_ok = not bull_guard and regime != 4 and rsi_ok and late_ok
+    short_trend_ok = short_env_ok and close_val < daily_ema and daily_ema_dir <= 0
+    short_aggressive_ok = short_trend_ok and weekly_ema_dir <= 0
+
+    if ranging:
+        if score_mr_range_l >= mr_range_th:
+            return _btc_tactical_signal(symbol, "meanrev_range", Direction.LONG, score_mr_range_l)
+        if sweep_gate_l and sweep_score_l + perp_long_bonus >= sweep_th:
+            return _btc_tactical_signal(symbol, "sweep_reversal", Direction.LONG, sweep_score_l + perp_long_bonus)
+        if sweep_gate_s and sweep_score_s >= sweep_th:
+            return _btc_tactical_signal(symbol, "sweep_reversal", Direction.SHORT, sweep_score_s)
+        return None
+
+    if strong_bear:
+        if short_aggressive_ok and score_crash_s >= crash_th:
+            return _btc_tactical_signal(symbol, "crash", Direction.SHORT, score_crash_s)
+        if short_trend_ok and score_pb_s >= pb_th_s:
+            return _btc_tactical_signal(symbol, "pullback_struct", Direction.SHORT, score_pb_s)
+        if sweep_gate_s and sweep_score_s >= sweep_th:
+            return _btc_tactical_signal(symbol, "sweep_reversal", Direction.SHORT, sweep_score_s)
+        if short_env_ok and bt_gate and score_bt_s >= bt_th:
+            return _btc_tactical_signal(symbol, "bull_trap", Direction.SHORT, score_bt_s)
+        return None
+
+    if not strong_bull and not ranging and not compression:
+        if short_trend_ok and score_pb_s >= pb_th_s:
+            return _btc_tactical_signal(symbol, "pullback_struct", Direction.SHORT, score_pb_s)
+        if sweep_gate_s and sweep_score_s >= sweep_th:
+            return _btc_tactical_signal(symbol, "sweep_reversal", Direction.SHORT, sweep_score_s)
+        if short_env_ok and bt_gate and score_bt_s >= bt_th:
+            return _btc_tactical_signal(symbol, "bull_trap", Direction.SHORT, score_bt_s)
+        return None
+
+    if strong_bull:
+        if retest_score_l >= bo_retest_th:
+            return _btc_tactical_signal(symbol, "breakout_retest", Direction.LONG, retest_score_l)
+        if struct_score_l + perp_long_bonus >= pb_struct_th:
+            return _btc_tactical_signal(symbol, "pullback_struct", Direction.LONG, struct_score_l + perp_long_bonus)
+        if sweep_gate_l and sweep_score_l + perp_long_bonus >= sweep_th:
+            return _btc_tactical_signal(symbol, "sweep_reversal", Direction.LONG, sweep_score_l + perp_long_bonus)
+        if score_mr_range_l >= mr_range_th:
+            return _btc_tactical_signal(symbol, "meanrev_range", Direction.LONG, score_mr_range_l)
+        return None
+
+    if compression:
+        if retest_score_l >= bo_retest_th:
+            return _btc_tactical_signal(symbol, "breakout_retest", Direction.LONG, retest_score_l)
+        if sweep_gate_l and sweep_score_l >= sweep_th:
+            return _btc_tactical_signal(symbol, "sweep_reversal", Direction.LONG, sweep_score_l)
+        return None
+
+    if weak_bull:
+        if retest_score_l >= bo_retest_th:
+            return _btc_tactical_signal(symbol, "breakout_retest", Direction.LONG, retest_score_l)
+        if struct_score_l + perp_long_bonus >= pb_struct_th:
+            return _btc_tactical_signal(symbol, "pullback_struct", Direction.LONG, struct_score_l + perp_long_bonus)
+        if sweep_gate_l and sweep_score_l + perp_long_bonus >= sweep_th:
+            return _btc_tactical_signal(symbol, "sweep_reversal", Direction.LONG, sweep_score_l + perp_long_bonus)
+        if score_mr_range_l >= mr_range_th:
+            return _btc_tactical_signal(symbol, "meanrev_range", Direction.LONG, score_mr_range_l)
+        return None
+
+    return None
+
+
+def _btc_tactical_signal(symbol: str, module: str, direction: Direction, score: float) -> Signal:
+    return _btc_compat_signal(
+        symbol,
+        module,
+        direction,
+        score,
+        entry_reason=f"{module} BTC tactical compatibility entry",
+        invalidation="BTC tactical compatibility exit and risk rules",
+    )
+
+
+def _btc_compat_signal(
+    symbol: str,
+    module: str,
+    direction: Direction,
+    score: float,
+    *,
+    entry_reason: str | None = None,
+    invalidation: str = "BTC compatibility exit and risk rules",
+    required_data: tuple[str, ...] = ("ohlcv:4h", "features:btc_compat"),
+) -> Signal:
+    return Signal(
+        module=module,
+        symbol=symbol,
+        direction=direction,
+        score=score,
+        entry_reason=entry_reason or f"{module} BTC compatibility entry",
+        invalidation=invalidation,
+        confidence=max(0.0, min(1.0, score / 100.0)),
+        required_data=required_data,
+    )
+
+
+def _btc_base_entry_direction(
+    *,
+    regime: int,
+    daily_ema_dir: float,
+    weekly_ema_dir: float,
+    allow_long: bool,
+    allow_short: bool,
+    long_score: float,
+    short_score: float,
+    score_threshold: float,
+) -> bool | None:
+    if regime == 4:
+        return None
+
+    long_signal = allow_long and long_score >= score_threshold
+    short_signal = allow_short and short_score >= score_threshold
+    if not long_signal and not short_signal:
+        return None
+
+    if long_signal and short_signal:
+        if daily_ema_dir > 0 and weekly_ema_dir >= 0:
+            return True
+        if daily_ema_dir < 0 and weekly_ema_dir <= 0:
+            return False
+        return None
+
+    return True if long_signal else False
+
+
+def _row_float(row: pd.Series, column: str) -> float:
+    value = row.get(column, 0.0)
+    if pd.isna(value):
+        return 0.0
+    return float(value)
+
+
+def _row_bool(row: pd.Series, column: str) -> bool:
+    value = row.get(column, False)
+    if pd.isna(value):
+        return False
+    return bool(value)
+
+
+def _optional_row_float(row: pd.Series, column: str | None) -> float | None:
+    if not column:
+        return None
+    value = row.get(column)
+    if pd.isna(value):
+        return None
+    return float(value)
 
 
 def add_btc_signal_predicate_columns(features: pd.DataFrame) -> pd.DataFrame:

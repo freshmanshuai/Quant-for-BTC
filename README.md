@@ -249,6 +249,40 @@ Modify defaults directly in the dataclass or pass custom instances at runtime.
 
 Usage: Paste into Pine Editor on BTC/USDT 4H chart, add to chart, create alerts from the script's conditions.
 
+New TradingView Pine scripts can be generated from supported platform signal-module configs, including Breakout, Pullback, Mean Reversion, Sweep Reversal, Crash Short, Failed Bounce, and Bull Trap:
+
+```python
+from quant_platform.pine import generate_signal_module_pine, write_pine_script
+from quant_platform.signal_modules import BreakoutSignalConfig
+
+source = generate_signal_module_pine([BreakoutSignalConfig(lookback=55, timeframe="240")])
+write_pine_script("pine/generated_signals.pine", source)
+```
+
+Python/Pine parity can be checked with exported golden-vector observations:
+
+```bash
+python -m pine.compare_golden_vectors --expected expected_vectors.json --observed pine_observed.csv --tolerance 0.01
+```
+
+The generated parity example under `pine/examples/` includes:
+
+- `signal_module_parity.pine`: a Pine script generated from the current direct-compute signal-module configs.
+- `expected_vectors.json`: Python-generated expected rows for Breakout, Pullback, Mean Reversion, Sweep Reversal, Crash Short, Failed Bounce, and Bull Trap.
+- `observed_template.csv`: a matching observation-schema template that can be replaced with TradingView alert/export output.
+
+Regenerate the example artifacts with:
+
+```bash
+python -m pine.signal_module_parity --output-dir pine/examples
+```
+
+Compare a TradingView alert/export file against freshly regenerated expected vectors with:
+
+```bash
+python -m pine.signal_module_parity --output-dir pine/examples --observed pine_observed.csv --tolerance 0.01
+```
+
 ## Strategy Evolution
 
 | Step | Innovation | Key Result |

@@ -110,7 +110,29 @@
             <option value="4h">4h</option>
             <option value="1h">1h</option>
             <option value="15m">15m</option>
+            <option value="1d">1d</option>
           </select>
+          <select id="pipeline-symbol" aria-label="Symbol" multiple size="2">
+            <option value="BTC/USDT" selected>BTC/USDT</option>
+            <option value="AAPL">AAPL</option>
+          </select>
+          <select id="pipeline-exchange" aria-label="Exchange" multiple size="2">
+            <option value="binance" selected>binance</option>
+            <option value="nasdaq">nasdaq</option>
+          </select>
+          <select id="pipeline-market-type" aria-label="Market type" multiple size="2">
+            <option value="swap" selected>swap</option>
+            <option value="equity">equity</option>
+          </select>
+          <label><input id="pipeline-refresh-bars" type="checkbox"> Refresh bars</label>
+          <label><input id="pipeline-refresh-features" type="checkbox"> Refresh features</label>
+          <label><input id="pipeline-intrabar-entry-limit" type="checkbox"> Limit entries</label>
+          <input id="pipeline-entry-order-age-bars" inputmode="numeric" aria-label="Entry order age bars" placeholder="Max age">
+          <input id="pipeline-exit-order-age-bars" inputmode="numeric" aria-label="Exit order age bars" placeholder="Exit age">
+          <input id="pipeline-exit-fill-fraction" inputmode="decimal" aria-label="Exit fill fraction" placeholder="Exit fill cap">
+          <input id="pipeline-exit-volume-fraction" inputmode="decimal" aria-label="Exit volume fraction" placeholder="Exit volume">
+          <input id="pipeline-entry-spread-feature" aria-label="Entry spread feature" placeholder="Spread feature">
+          <input id="pipeline-exit-spread-feature" aria-label="Exit spread feature" placeholder="Exit spread">
           <input id="pipeline-equity" value="10000" inputmode="decimal" aria-label="Equity">
           <button id="pipeline-refresh">Refresh</button>
           <span id="pipeline-status">Idle</span>
@@ -121,10 +143,27 @@
 
       <div class="pipeline-grid">
         <div class="ai-panel">
+          <div class="panel-title">Market Session</div>
+          <div id="pipeline-market-session-feed" class="stream-feed"></div>
+        </div>
+        <div class="ai-panel">
+          <div class="panel-title">Feature Cache</div>
+          <div id="pipeline-feature-cache-feed" class="stream-feed"></div>
+        </div>
+        <div class="ai-panel">
+          <div class="panel-title">Risk Budget</div>
+          <div class="table-wrap compact">
+            <table class="ai-table">
+              <thead><tr><th>Group</th><th>Key</th><th>Used</th><th>Budget</th><th>Remaining</th><th>Use</th></tr></thead>
+              <tbody id="pipeline-risk-budget-rows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="ai-panel">
           <div class="panel-title">Signals</div>
           <div class="table-wrap compact">
             <table class="ai-table">
-              <thead><tr><th>Module</th><th>Dir</th><th>Score</th><th>Stop</th><th>Target</th></tr></thead>
+              <thead><tr><th>Module</th><th>Dir</th><th>Score</th><th>Stop</th><th>Target</th><th>Data</th></tr></thead>
               <tbody id="pipeline-signal-rows"></tbody>
             </table>
           </div>
@@ -163,7 +202,7 @@
           <div class="panel-title">Event Trades</div>
           <div class="table-wrap compact">
             <table class="ai-table">
-              <thead><tr><th>Module</th><th>Exit</th><th>Qty</th><th>Gross</th><th>Net</th></tr></thead>
+              <thead><tr><th>Module</th><th>Exit</th><th>Holding</th><th>Qty</th><th>Gross</th><th>Net</th></tr></thead>
               <tbody id="pipeline-backtest-trade-rows"></tbody>
             </table>
           </div>
@@ -172,6 +211,36 @@
           <div class="panel-title">Event Equity</div>
           <div id="pipeline-equity-feed" class="stream-feed"></div>
         </div>
+        <div class="ai-panel">
+          <div class="panel-title">Event Exposure</div>
+          <div id="pipeline-exposure-feed" class="stream-feed"></div>
+        </div>
+        <div class="ai-panel">
+          <div class="panel-title">Final Portfolio</div>
+          <div class="table-wrap compact">
+            <table class="ai-table">
+              <thead><tr><th>Symbol</th><th>Layer</th><th>Dir</th><th>Qty</th><th>Entry</th><th>Risk</th><th>Module</th></tr></thead>
+              <tbody id="pipeline-final-portfolio-rows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="ai-panel">
+          <div class="panel-title">Event Feature Cache</div>
+          <div id="pipeline-event-feature-cache-feed" class="stream-feed"></div>
+        </div>
+        <div class="ai-panel">
+          <div class="panel-title">Event Order Status</div>
+          <div class="table-wrap compact">
+            <table class="ai-table">
+              <thead><tr><th>Status</th><th>Count</th></tr></thead>
+              <tbody id="pipeline-order-status-rows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="ai-panel">
+          <div class="panel-title">Regime</div>
+          <div id="pipeline-regime-feed" class="stream-feed"></div>
+        </div>
       </div>
 
       <div class="pipeline-grid">
@@ -179,7 +248,7 @@
           <div class="panel-title">Event Attribution</div>
           <div class="table-wrap compact">
             <table class="ai-table">
-              <thead><tr><th>Group</th><th>Key</th><th>Trades</th><th>Net</th><th>Win</th></tr></thead>
+              <thead><tr><th>Group</th><th>Key</th><th>Trades</th><th>Net</th><th>Win</th><th>Hold</th><th>PF</th><th>Payoff</th></tr></thead>
               <tbody id="pipeline-backtest-attribution-rows"></tbody>
             </table>
           </div>
@@ -195,6 +264,42 @@
             <table class="ai-table">
               <thead><tr><th>Metric</th><th>Legacy</th><th>Event</th><th>Delta</th></tr></thead>
               <tbody id="pipeline-comparison-rows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="ai-panel">
+          <div class="panel-title">Order Parity</div>
+          <div class="table-wrap compact">
+            <table class="ai-table">
+              <thead><tr><th>Module</th><th>Legacy</th><th>Event</th><th>Matched</th><th>Mismatch</th></tr></thead>
+              <tbody id="pipeline-order-parity-rows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="ai-panel">
+          <div class="panel-title">Migration Readiness</div>
+          <div class="table-wrap compact">
+            <table class="ai-table">
+              <thead><tr><th>Module</th><th>Status</th><th>Ready</th><th>Reason</th></tr></thead>
+              <tbody id="pipeline-migration-readiness-rows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="ai-panel">
+          <div class="panel-title">Risk Audit</div>
+          <div class="table-wrap compact">
+            <table class="ai-table">
+              <thead><tr><th>Bar</th><th>Module</th><th>Status</th><th>Would Block</th><th>Risk Delta</th></tr></thead>
+              <tbody id="pipeline-risk-audit-rows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="ai-panel">
+          <div class="panel-title">Pipeline Audit</div>
+          <div class="table-wrap compact">
+            <table class="ai-table">
+              <thead><tr><th>Signals</th><th>Risk Decisions</th><th>Orders</th><th>Risk Used</th></tr></thead>
+              <tbody id="pipeline-pipeline-audit-rows"></tbody>
             </table>
           </div>
         </div>

@@ -7,7 +7,13 @@ from pathlib import Path
 
 import pandas as pd
 
-from quant_platform.data import BarSeriesId, DerivativeSeriesId, ExternalMetricSeriesId, FeatureSeriesId
+from quant_platform.data import (
+    BarSeriesId,
+    DerivativeSeriesId,
+    ExternalMetricSeriesId,
+    FeatureSeriesId,
+    OrderBookSeriesId,
+)
 
 
 class MissingStorageDependency(RuntimeError):
@@ -34,7 +40,11 @@ class SQLiteBarStore:
     def write(self, series_id: BarSeriesId, bars: pd.DataFrame) -> Path:
         path = self.path_for(series_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        frame = bars[["Open", "High", "Low", "Close", "Volume"]].copy()
+        has_turnover = "Turnover" in bars.columns
+        columns = ["Open", "High", "Low", "Close", "Volume"]
+        if has_turnover:
+            columns.append("Turnover")
+        frame = bars[columns].copy()
         frame.index = pd.to_datetime(frame.index, utc=True)
 
         rows = [
@@ -45,6 +55,7 @@ class SQLiteBarStore:
                 float(row.Low),
                 float(row.Close),
                 float(row.Volume),
+                float(row.Turnover) if has_turnover else None,
             )
             for timestamp, row in frame.iterrows()
         ]
@@ -58,15 +69,19 @@ class SQLiteBarStore:
                     high REAL NOT NULL,
                     low REAL NOT NULL,
                     close REAL NOT NULL,
-                    volume REAL NOT NULL
+                    volume REAL NOT NULL,
+                    turnover REAL
                 )
                 """
             )
+            table_columns = {row[1] for row in conn.execute("PRAGMA table_info(bars)").fetchall()}
+            if "turnover" not in table_columns:
+                conn.execute("ALTER TABLE bars ADD COLUMN turnover REAL")
             conn.execute("DELETE FROM bars")
             conn.executemany(
                 """
-                INSERT INTO bars (timestamp, open, high, low, close, volume)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO bars (timestamp, open, high, low, close, volume, turnover)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -81,7 +96,7 @@ class SQLiteBarStore:
         try:
             frame = pd.read_sql_query(
                 """
-                SELECT timestamp, open, high, low, close, volume
+                SELECT timestamp, open, high, low, close, volume, turnover
                 FROM bars
                 ORDER BY timestamp
                 """,
@@ -91,7 +106,9 @@ class SQLiteBarStore:
             conn.close()
         frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
         frame = frame.set_index("timestamp")
-        frame.columns = ["Open", "High", "Low", "Close", "Volume"]
+        frame.columns = ["Open", "High", "Low", "Close", "Volume", "Turnover"]
+        if frame["Turnover"].isna().all():
+            frame = frame.drop(columns=["Turnover"])
         return frame
 
 
@@ -252,6 +269,90 @@ class ParquetExternalMetricStore:
             raise MissingStorageDependency(
                 "Parquet storage requires pyarrow or fastparquet. Install pyarrow to enable ExternalMetricStore persistence."
             ) from exc
+
+
+class ParquetOrderBookStore:
+    """Parquet-first order-book storage keyed by `OrderBookSeriesId`."""
+
+    def __init__(self, root: Path | str):
+        self.root = Path(root)
+
+    def path_for(self, series_id: OrderBookSeriesId) -> Path:
+        safe_symbol = series_id.symbol.replace("/", "_")
+        return (
+            self.root
+            / series_id.source
+            / series_id.exchange
+            / series_id.market_type
+            / safe_symbol
+            / "order_book"
+            / f"depth_{series_id.depth}"
+            / f"{series_id.sample_interval}.parquet"
+        )
+
+    def write(self, series_id: OrderBookSeriesId, snapshots: pd.DataFrame) -> Path:
+        path = self.path_for(series_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            snapshots.to_parquet(path)
+        except ImportError as exc:
+            raise MissingStorageDependency(
+                "Parquet storage requires pyarrow or fastparquet. Install pyarrow to enable OrderBookStore persistence."
+            ) from exc
+        return path
+
+    def read(self, series_id: OrderBookSeriesId) -> pd.DataFrame:
+        try:
+            return pd.read_parquet(self.path_for(series_id))
+        except ImportError as exc:
+            raise MissingStorageDependency(
+                "Parquet storage requires pyarrow or fastparquet. Install pyarrow to enable OrderBookStore persistence."
+            ) from exc
+
+
+class SQLiteOrderBookStore:
+    """SQLite order-book storage keyed by `OrderBookSeriesId`."""
+
+    def __init__(self, root: Path | str):
+        self.root = Path(root)
+
+    def path_for(self, series_id: OrderBookSeriesId) -> Path:
+        safe_symbol = series_id.symbol.replace("/", "_")
+        return (
+            self.root
+            / series_id.source
+            / series_id.exchange
+            / series_id.market_type
+            / safe_symbol
+            / "order_book"
+            / f"depth_{series_id.depth}"
+            / f"{series_id.sample_interval}.sqlite"
+        )
+
+    def write(self, series_id: OrderBookSeriesId, snapshots: pd.DataFrame) -> Path:
+        path = self.path_for(series_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        frame = snapshots.copy()
+        frame.index = pd.to_datetime(frame.index, utc=True)
+        frame.insert(0, "timestamp", [timestamp.isoformat() for timestamp in frame.index])
+
+        conn = sqlite3.connect(path)
+        try:
+            frame.to_sql("order_book", conn, if_exists="replace", index=False)
+            conn.commit()
+        finally:
+            conn.close()
+        return path
+
+    def read(self, series_id: OrderBookSeriesId) -> pd.DataFrame:
+        path = self.path_for(series_id)
+        conn = sqlite3.connect(path)
+        try:
+            frame = pd.read_sql_query("SELECT * FROM order_book ORDER BY timestamp", conn)
+        finally:
+            conn.close()
+        frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
+        return frame.set_index("timestamp")
 
 
 class SQLiteExternalMetricStore:

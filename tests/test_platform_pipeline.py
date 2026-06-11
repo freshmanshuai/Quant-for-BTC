@@ -166,6 +166,135 @@ class SignalPipelineTest(unittest.TestCase):
         self.assertEqual(result.risk_decisions[0].reason, "correlation_group_risk_budget_exhausted")
         self.assertEqual(result.portfolio_plan.orders[0].action, OrderAction.IGNORE)
 
+    def test_pipeline_uses_market_spec_correlation_group_for_existing_position_budget(self):
+        from quant_platform.core import AssetSpec, MarketSpec
+        from quant_platform.pipeline import SignalPipeline
+        from quant_platform.portfolio import OrderAction, PortfolioEngine, PortfolioState, Position, PositionKey
+        from quant_platform.risk import AccountState, RiskEngine, RiskLimits
+        from quant_platform.signal_modules import SignalModuleRunner
+
+        markets = {
+            "AAPL": MarketSpec(
+                asset=AssetSpec(symbol="AAPL", base="AAPL", quote="USD"),
+                exchange="nasdaq",
+                market_type="equity",
+                correlation_group="us_equity_beta",
+            ),
+            "MSFT": MarketSpec(
+                asset=AssetSpec(symbol="MSFT", base="MSFT", quote="USD"),
+                exchange="nasdaq",
+                market_type="equity",
+                correlation_group="us_equity_beta",
+            ),
+        }
+        state = PortfolioState(positions={
+            PositionKey("AAPL", "tactical"): Position(
+                symbol="AAPL",
+                layer="tactical",
+                direction=Direction.LONG,
+                quantity=1.0,
+                notional=10_000.0,
+                risk_amount=450.0,
+                module="breakout",
+                entry_price=100.0,
+                stop_price=95.0,
+            )
+        })
+        pipeline = SignalPipeline(
+            signal_runner=SignalModuleRunner([FixedSignalModule(self._signal(symbol="MSFT"))]),
+            risk_engine=RiskEngine(RiskLimits(
+                risk_per_trade=0.02,
+                portfolio_risk_budget=0.20,
+                max_correlation_group_risk=0.05,
+            )),
+            portfolio_engine=PortfolioEngine(state=state),
+            markets_by_symbol=markets,
+        )
+
+        result = pipeline.run(self._features(), symbol="MSFT", account=AccountState(equity=10_000.0))
+
+        self.assertFalse(result.risk_decisions[0].allowed)
+        self.assertEqual(result.risk_decisions[0].reason, "correlation_group_risk_budget_exhausted")
+        self.assertEqual(result.portfolio_plan.orders[0].action, OrderAction.IGNORE)
+
+    def test_pipeline_accumulates_market_spec_correlation_group_within_signal_batch(self):
+        from quant_platform.core import AssetSpec, MarketSpec
+        from quant_platform.pipeline import SignalPipeline
+        from quant_platform.portfolio import OrderAction, PortfolioEngine
+        from quant_platform.risk import AccountState, RiskEngine, RiskLimits
+        from quant_platform.signal_modules import SignalModuleRunner
+
+        markets = {
+            "AAPL": MarketSpec(
+                asset=AssetSpec(symbol="AAPL", base="AAPL", quote="USD"),
+                exchange="nasdaq",
+                market_type="equity",
+                correlation_group="us_equity_beta",
+            ),
+            "MSFT": MarketSpec(
+                asset=AssetSpec(symbol="MSFT", base="MSFT", quote="USD"),
+                exchange="nasdaq",
+                market_type="equity",
+                correlation_group="us_equity_beta",
+            ),
+        }
+        pipeline = SignalPipeline(
+            signal_runner=SignalModuleRunner([
+                FixedSignalModule(self._signal(symbol="AAPL", score=90.0)),
+                FixedSignalModule(self._signal(symbol="MSFT", score=80.0)),
+            ]),
+            risk_engine=RiskEngine(RiskLimits(
+                risk_per_trade=0.02,
+                portfolio_risk_budget=0.20,
+                max_correlation_group_risk=0.03,
+            )),
+            portfolio_engine=PortfolioEngine(),
+            markets_by_symbol=markets,
+        )
+
+        result = pipeline.run(
+            self._features(),
+            symbol="AAPL",
+            account=AccountState(equity=10_000.0),
+            entry_prices={"AAPL": 100.0, "MSFT": 100.0},
+        )
+
+        self.assertTrue(result.risk_decisions[0].allowed)
+        self.assertFalse(result.risk_decisions[1].allowed)
+        self.assertEqual(result.risk_decisions[1].reason, "correlation_group_risk_budget_exhausted")
+        self.assertEqual(result.portfolio_plan.orders[0].action, OrderAction.OPEN)
+        self.assertEqual(result.portfolio_plan.orders[1].action, OrderAction.IGNORE)
+
+    def test_pipeline_prioritizes_high_score_same_layer_signal_before_risk_budget(self):
+        from quant_platform.pipeline import SignalPipeline
+        from quant_platform.portfolio import OrderAction, PortfolioEngine, PositionKey
+        from quant_platform.risk import AccountState, RiskEngine, RiskLimits
+        from quant_platform.signal_modules import SignalModuleRunner
+
+        portfolio_engine = PortfolioEngine()
+        pipeline = SignalPipeline(
+            signal_runner=SignalModuleRunner([
+                FixedSignalModule(self._signal(module="pullback", score=65.0)),
+                FixedSignalModule(self._signal(module="breakout", score=95.0)),
+            ]),
+            risk_engine=RiskEngine(RiskLimits(
+                risk_per_trade=0.02,
+                portfolio_risk_budget=0.02,
+                max_position_fraction=1.0,
+            )),
+            portfolio_engine=portfolio_engine,
+        )
+
+        result = pipeline.run(self._features(), symbol="BTC/USDT", account=AccountState(equity=10_000.0))
+
+        self.assertEqual([decision.signal.module for decision in result.risk_decisions], ["breakout", "pullback"])
+        self.assertTrue(result.risk_decisions[0].allowed)
+        self.assertFalse(result.risk_decisions[1].allowed)
+        self.assertEqual(result.risk_decisions[1].reason, "portfolio_risk_budget_exhausted")
+        self.assertEqual(result.portfolio_plan.orders[0].action, OrderAction.OPEN)
+        self.assertEqual(result.portfolio_plan.orders[0].decision.signal.module, "breakout")
+        self.assertEqual(portfolio_engine.state.positions[PositionKey("BTC/USDT", "tactical")].module, "breakout")
+
     def test_pipeline_blocks_signal_when_existing_position_exhausts_module_budget(self):
         from quant_platform.pipeline import SignalPipeline
         from quant_platform.portfolio import OrderAction, PortfolioEngine, PortfolioState, Position, PositionKey
@@ -200,6 +329,91 @@ class SignalPipelineTest(unittest.TestCase):
         self.assertFalse(result.risk_decisions[0].allowed)
         self.assertEqual(result.risk_decisions[0].reason, "module_risk_budget_exhausted")
         self.assertEqual(result.portfolio_plan.orders[0].action, OrderAction.IGNORE)
+
+    def test_pipeline_returns_risk_budget_diagnostics_after_allowed_decisions(self):
+        from quant_platform.pipeline import SignalPipeline
+        from quant_platform.portfolio import PortfolioEngine, PortfolioState, Position, PositionKey
+        from quant_platform.risk import AccountState, RiskEngine, RiskLimits
+        from quant_platform.signal_modules import SignalModuleRunner
+
+        state = PortfolioState(positions={
+            PositionKey("BTC/USDT", "tactical"): Position(
+                symbol="BTC/USDT",
+                layer="tactical",
+                direction=Direction.LONG,
+                quantity=1.0,
+                notional=10_000.0,
+                risk_amount=100.0,
+                module="breakout",
+                entry_price=100.0,
+                stop_price=95.0,
+            )
+        })
+        pipeline = SignalPipeline(
+            signal_runner=SignalModuleRunner([
+                FixedSignalModule(self._signal(symbol="ETH/USDT", module="pullback", preferred_stop=90.0))
+            ]),
+            risk_engine=RiskEngine(RiskLimits(
+                risk_per_trade=0.02,
+                portfolio_risk_budget=0.10,
+                max_symbol_risk=0.05,
+                max_module_risk=0.06,
+                max_correlation_group_risk=0.05,
+                correlation_groups={"BTC/USDT": "crypto_beta", "ETH/USDT": "crypto_beta"},
+            )),
+            portfolio_engine=PortfolioEngine(state=state, allow_hedging=True),
+        )
+
+        result = pipeline.run(self._features(), symbol="ETH/USDT", account=AccountState(equity=10_000.0))
+        diagnostics = result.risk_diagnostics.to_dict()
+
+        self.assertTrue(result.risk_decisions[0].allowed)
+        self.assertEqual(diagnostics["portfolio"]["used"], 300.0)
+        self.assertEqual(diagnostics["portfolio"]["budget"], 1_000.0)
+        self.assertEqual(diagnostics["symbols"]["BTC/USDT"]["used"], 100.0)
+        self.assertEqual(diagnostics["symbols"]["ETH/USDT"]["used"], 200.0)
+        self.assertEqual(diagnostics["symbols"]["ETH/USDT"]["budget"], 500.0)
+        self.assertEqual(diagnostics["modules"]["breakout"]["used"], 100.0)
+        self.assertEqual(diagnostics["modules"]["pullback"]["used"], 200.0)
+        self.assertEqual(diagnostics["correlation_groups"]["crypto_beta"]["used"], 300.0)
+        self.assertEqual(diagnostics["correlation_groups"]["crypto_beta"]["budget"], 500.0)
+
+    def test_pipeline_can_apply_precomputed_risk_decisions_for_legacy_bridges(self):
+        from quant_platform.delivery import InMemoryDeliveryChannel
+        from quant_platform.pipeline import SignalPipeline
+        from quant_platform.portfolio import OrderAction, PortfolioEngine
+        from quant_platform.risk import AccountState, RiskDecision, RiskEngine, RiskLimits
+        from quant_platform.signal_modules import SignalModuleRunner
+
+        signal = self._signal(module="legacy_breakout", preferred_stop=95.0, preferred_target=118.0)
+        decision = RiskDecision(
+            allowed=True,
+            reason="legacy_compat_audit",
+            signal=signal,
+            quantity=4.0,
+            notional=400.0,
+            risk_amount=20.0,
+            entry_price=100.0,
+            stop_price=95.0,
+            max_loss_per_unit=5.0,
+        )
+        delivery = InMemoryDeliveryChannel("dashboard")
+        pipeline = SignalPipeline(
+            signal_runner=SignalModuleRunner([]),
+            risk_engine=RiskEngine(RiskLimits(portfolio_risk_budget=0.10)),
+            portfolio_engine=PortfolioEngine(layer_by_module={"legacy_breakout": "tactical"}),
+            delivery_channels=(delivery,),
+        )
+
+        result = pipeline.run_decisions([decision], account=AccountState(equity=10_000.0))
+
+        self.assertEqual(result.signals, [signal])
+        self.assertEqual(result.risk_decisions, [decision])
+        self.assertEqual(result.portfolio_plan.orders[0].action, OrderAction.OPEN)
+        self.assertIs(result.portfolio_plan.orders[0].decision, decision)
+        self.assertEqual(len(result.delivery_results), 1)
+        self.assertEqual(delivery.messages[0].risk["reason"], "legacy_compat_audit")
+        self.assertEqual(result.risk_diagnostics.portfolio.used, 20.0)
 
     def test_btc_standard_signal_with_preferred_exit_flows_through_pipeline(self):
         from quant_btc.signal_modules import generate_btc_standard_signals

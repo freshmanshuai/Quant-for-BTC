@@ -1,0 +1,58 @@
+[
+  {
+    "bar_time": "1780315200000",
+    "entry_price": 105.0,
+    "score": 99.41176470588225,
+    "signal_key": "AAPL|tactical|breakout|long",
+    "stop_price": 95.0,
+    "target_price": 125.0
+  },
+  {
+    "bar_time": "1780329600000",
+    "entry_price": 107.0,
+    "score": 75.76699029126213,
+    "signal_key": "AAPL|tactical|pullback|long",
+    "stop_price": 102.0,
+    "target_price": 117.0
+  },
+  {
+    "bar_time": "1780329600000",
+    "entry_price": 99.5,
+    "score": 74.09090909090908,
+    "signal_key": "AAPL|tactical|meanrev|long",
+    "stop_price": 96.0,
+    "target_price": 100.0
+  },
+  {
+    "bar_time": "1780315200000",
+    "entry_price": 100.0,
+    "score": 76.20408163265307,
+    "signal_key": "AAPL|tactical|sweep_reversal|long",
+    "stop_price": 97.0,
+    "target_price": 105.0
+  },
+  {
+    "bar_time": "1780315200000",
+    "entry_price": 97.0,
+    "score": 74.47572815533981,
+    "signal_key": "AAPL|tactical|crash_short|short",
+    "stop_price": 104.0,
+    "target_price": 83.0
+  },
+  {
+    "bar_time": "1780329600000",
+    "entry_price": 99.0,
+    "score": 89.15151515151518,
+    "signal_key": "AAPL|tactical|failed_bounce|short",
+    "stop_price": 104.0,
+    "target_price": 96.0
+  },
+  {
+    "bar_time": "1780329600000",
+    "entry_price": 101.0,
+    "score": 89.68012185833966,
+    "signal_key": "AAPL|tactical|bull_trap|short",
+    "stop_price": 106.0,
+    "target_price": 96.0
+  }
+]

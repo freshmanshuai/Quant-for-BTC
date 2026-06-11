@@ -34,6 +34,20 @@ class FakeDerivativeExchange(FakeExchange):
         ]
 
 
+class FakeOrderBookExchange(FakeExchange):
+    def __init__(self):
+        super().__init__([])
+        self.order_book_calls = []
+
+    def fetch_order_book(self, symbol, limit=None):
+        self.order_book_calls.append({"symbol": symbol, "limit": limit})
+        return {
+            "timestamp": 1700000000123,
+            "bids": [[100.0, 1.5], [99.5, 2.0]],
+            "asks": [[100.5, 1.2], [101.0, 2.4]],
+        }
+
+
 class CcxtConnectorTest(unittest.TestCase):
     def test_binance_swap_uses_usdm_factory_and_returns_normalized_bars(self):
         from quant_platform.connectors_ccxt import CcxtExchangeConnector
@@ -123,6 +137,41 @@ class CcxtConnectorTest(unittest.TestCase):
         self.assertEqual(str(df.index.tz), "UTC")
         self.assertEqual(exchange.calls[0]["method"], "funding")
         self.assertEqual(exchange.calls[1]["method"], "open_interest")
+
+    def test_fetch_order_book_snapshots_returns_normalized_depth_frame(self):
+        from quant_platform.connectors_ccxt import CcxtExchangeConnector
+        from quant_platform.core import AssetSpec, MarketSpec
+
+        exchange = FakeOrderBookExchange()
+        market = MarketSpec(
+            asset=AssetSpec(symbol="BTC/USDT", base="BTC", quote="USDT"),
+            exchange="binance",
+            market_type="swap",
+        )
+        connector = CcxtExchangeConnector(exchange_factory=lambda *_: exchange)
+
+        df = connector.fetch_order_book_snapshots(market, depth=2, sample_interval="snapshot")
+
+        self.assertEqual(exchange.order_book_calls, [{"symbol": "BTC/USDT", "limit": 2}])
+        self.assertEqual(
+            list(df.columns),
+            [
+                "bid_price_1",
+                "bid_size_1",
+                "bid_price_2",
+                "bid_size_2",
+                "ask_price_1",
+                "ask_size_1",
+                "ask_price_2",
+                "ask_size_2",
+                "spread",
+            ],
+        )
+        self.assertEqual(str(df.index[0]), "2023-11-14 22:13:20.123000+00:00")
+        self.assertEqual(str(df.index.tz), "UTC")
+        self.assertEqual(float(df.iloc[0]["bid_price_1"]), 100.0)
+        self.assertEqual(float(df.iloc[0]["ask_price_2"]), 101.0)
+        self.assertEqual(float(df.iloc[0]["spread"]), 0.5)
 
 
 if __name__ == "__main__":

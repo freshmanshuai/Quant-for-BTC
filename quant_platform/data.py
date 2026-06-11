@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class BarSeriesId:
-    """Identifies one normalized OHLCV bar series."""
+    """Identifies one normalized bar series."""
 
     symbol: str
     exchange: str
@@ -53,6 +53,26 @@ class DerivativeSeriesId:
     def cache_key(self) -> str:
         safe_symbol = self.symbol.replace("/", "_")
         return f"{self.source}/{self.exchange}/{self.market_type}/{safe_symbol}/{self.timeframe}/derivatives"
+
+
+@dataclass(frozen=True)
+class OrderBookSeriesId:
+    """Identifies one normalized order-book snapshot series."""
+
+    symbol: str
+    exchange: str
+    market_type: str
+    depth: int
+    sample_interval: str
+    source: str
+
+    @property
+    def cache_key(self) -> str:
+        safe_symbol = self.symbol.replace("/", "_")
+        return (
+            f"{self.source}/{self.exchange}/{self.market_type}/{safe_symbol}"
+            f"/order_book/depth_{self.depth}/{self.sample_interval}"
+        )
 
 
 @dataclass(frozen=True)

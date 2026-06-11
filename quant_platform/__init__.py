@@ -5,6 +5,7 @@ from quant_platform.backtest import (
     BacktestAttributionBucket,
     BacktestEquityPoint,
     BacktestExecutionConfig,
+    BacktestPerformanceSummary,
     BacktestStateSnapshot,
     BacktestStep,
     BacktestTrade,
@@ -12,9 +13,19 @@ from quant_platform.backtest import (
     EventDrivenBacktestResult,
 )
 from quant_platform.core import AssetSpec, MarketSpec
-from quant_platform.connectors import DataConnector, DataConnectorRegistry
+from quant_platform.connectors import (
+    DataConnector,
+    DataConnectorRegistry,
+    fetch_bars_with_cache,
+    fetch_derivatives_with_cache,
+    fetch_order_book_snapshots_with_cache,
+)
+from quant_platform.connector_config import ConnectorConfigError, load_data_connector_registry_json
+from quant_platform.connectors_alpha_vantage import AlphaVantageConnector, AlphaVantageConnectorError
+from quant_platform.connectors_polygon import PolygonConnector, PolygonConnectorError
 from quant_platform.connectors_sqlite import SQLiteBarConnector, SQLiteConnectorError
-from quant_platform.data import BarSeriesId, DerivativeSeriesId, ExternalMetricSeriesId, FeatureSeriesId
+from quant_platform.connectors_yahoo import YahooConnectorError, YahooFinanceConnector
+from quant_platform.data import BarSeriesId, DerivativeSeriesId, ExternalMetricSeriesId, FeatureSeriesId, OrderBookSeriesId
 from quant_platform.delivery import (
     DeliveryPayload,
     DeliveryResult,
@@ -23,7 +34,16 @@ from quant_platform.delivery import (
     PineGoldenVector,
     TelegramDeliveryChannel,
     WebhookDeliveryChannel,
+    compare_pine_golden_vector_files,
     compare_pine_golden_vectors,
+    load_pine_golden_vectors_json,
+    load_pine_observations,
+    write_pine_golden_vectors_json,
+)
+from quant_platform.delivery_config import (
+    DeliveryConfigError,
+    build_delivery_channels,
+    load_delivery_channels_json,
 )
 from quant_platform.features import (
     BollingerConfig,
@@ -35,8 +55,11 @@ from quant_platform.features import (
     ExternalMetricFeatureConfig,
     ExternalMetricFeatureModule,
     FeatureEngine,
+    FeatureModuleRegistry,
     FeatureRunResult,
     FeatureStoreWriter,
+    OrderBookFeatureConfig,
+    OrderBookFeatureModule,
     PriceActionFeatureModule,
     TechnicalIndicatorConfig,
     TechnicalIndicatorModule,
@@ -44,6 +67,7 @@ from quant_platform.features import (
     VolatilityFeatureModule,
     VolumeConfig,
     VolumeFeatureModule,
+    default_feature_module_registry,
     run_feature_engine_with_cache,
 )
 from quant_platform.markets import (
@@ -70,8 +94,38 @@ from quant_platform.portfolio import (
     PositionKey,
 )
 from quant_platform.pipeline import PipelineResult, SignalPipeline
-from quant_platform.risk import AccountState, RiskDecision, RiskEngine, RiskLimits, RiskState
-from quant_platform.signal_modules import ColumnSignalConfig, ColumnSignalModule, SignalModule, SignalModuleRunner
+from quant_platform.pine import PineGenerationError, generate_signal_module_pine, write_pine_script
+from quant_platform.risk import (
+    AccountState,
+    RiskBudgetDiagnostics,
+    RiskBudgetUsage,
+    RiskDecision,
+    RiskEngine,
+    RiskLimits,
+    RiskState,
+)
+from quant_platform.signal_modules import (
+    BreakoutSignalConfig,
+    BreakoutSignalModule,
+    BullTrapSignalConfig,
+    BullTrapSignalModule,
+    ColumnSignalConfig,
+    ColumnSignalModule,
+    CrashShortSignalConfig,
+    CrashShortSignalModule,
+    FailedBounceSignalConfig,
+    FailedBounceSignalModule,
+    MeanReversionSignalConfig,
+    MeanReversionSignalModule,
+    PullbackSignalConfig,
+    PullbackSignalModule,
+    SignalModule,
+    SignalModuleRegistry,
+    SignalModuleRunner,
+    SweepReversalSignalConfig,
+    SweepReversalSignalModule,
+    default_signal_module_registry,
+)
 from quant_platform.signals import Direction, Signal
 from quant_platform.stores import (
     MissingStorageDependency,
@@ -79,10 +133,12 @@ from quant_platform.stores import (
     ParquetDerivativeStore,
     ParquetExternalMetricStore,
     ParquetFeatureStore,
+    ParquetOrderBookStore,
     SQLiteBarStore,
     SQLiteDerivativeStore,
     SQLiteExternalMetricStore,
     SQLiteFeatureStore,
+    SQLiteOrderBookStore,
 )
 
 __all__ = [
@@ -94,13 +150,25 @@ __all__ = [
     "save_market_catalog_json",
     "DataConnector",
     "DataConnectorRegistry",
+    "fetch_bars_with_cache",
+    "fetch_derivatives_with_cache",
+    "fetch_order_book_snapshots_with_cache",
+    "ConnectorConfigError",
+    "load_data_connector_registry_json",
+    "AlphaVantageConnector",
+    "AlphaVantageConnectorError",
+    "PolygonConnector",
+    "PolygonConnectorError",
     "SQLiteBarConnector",
     "SQLiteConnectorError",
+    "YahooConnectorError",
+    "YahooFinanceConnector",
     "BacktestAttribution",
     "BacktestAttributionBucket",
     "BacktestStep",
     "BacktestExecutionConfig",
     "BacktestEquityPoint",
+    "BacktestPerformanceSummary",
     "BacktestStateSnapshot",
     "BacktestTrade",
     "EventDrivenBacktest",
@@ -109,17 +177,27 @@ __all__ = [
     "DerivativeSeriesId",
     "ExternalMetricSeriesId",
     "FeatureSeriesId",
+    "OrderBookSeriesId",
     "DeliveryPayload",
     "DeliveryResult",
+    "DeliveryConfigError",
+    "build_delivery_channels",
+    "load_delivery_channels_json",
     "InMemoryDeliveryChannel",
     "WebhookDeliveryChannel",
     "TelegramDeliveryChannel",
     "EmailDeliveryChannel",
     "PineGoldenVector",
+    "write_pine_golden_vectors_json",
+    "load_pine_golden_vectors_json",
+    "load_pine_observations",
+    "compare_pine_golden_vector_files",
     "compare_pine_golden_vectors",
     "FeatureEngine",
+    "FeatureModuleRegistry",
     "FeatureRunResult",
     "FeatureStoreWriter",
+    "default_feature_module_registry",
     "run_feature_engine_with_cache",
     "TechnicalIndicatorConfig",
     "TechnicalIndicatorModule",
@@ -129,6 +207,8 @@ __all__ = [
     "DerivativesFeatureModule",
     "ExternalMetricFeatureConfig",
     "ExternalMetricFeatureModule",
+    "OrderBookFeatureConfig",
+    "OrderBookFeatureModule",
     "VolumeConfig",
     "VolumeFeatureModule",
     "VolatilityConfig",
@@ -151,15 +231,36 @@ __all__ = [
     "PortfolioEngine",
     "PipelineResult",
     "SignalPipeline",
+    "PineGenerationError",
+    "generate_signal_module_pine",
+    "write_pine_script",
     "AccountState",
+    "RiskBudgetDiagnostics",
+    "RiskBudgetUsage",
     "RiskLimits",
     "RiskDecision",
     "RiskState",
     "RiskEngine",
+    "BreakoutSignalConfig",
+    "BreakoutSignalModule",
+    "BullTrapSignalConfig",
+    "BullTrapSignalModule",
+    "CrashShortSignalConfig",
+    "CrashShortSignalModule",
+    "FailedBounceSignalConfig",
+    "FailedBounceSignalModule",
+    "MeanReversionSignalConfig",
+    "MeanReversionSignalModule",
+    "PullbackSignalConfig",
+    "PullbackSignalModule",
     "ColumnSignalConfig",
     "ColumnSignalModule",
     "SignalModule",
+    "SignalModuleRegistry",
     "SignalModuleRunner",
+    "default_signal_module_registry",
+    "SweepReversalSignalConfig",
+    "SweepReversalSignalModule",
     "Direction",
     "Signal",
     "MissingStorageDependency",
@@ -167,8 +268,10 @@ __all__ = [
     "ParquetDerivativeStore",
     "ParquetExternalMetricStore",
     "ParquetFeatureStore",
+    "ParquetOrderBookStore",
     "SQLiteBarStore",
     "SQLiteDerivativeStore",
     "SQLiteExternalMetricStore",
     "SQLiteFeatureStore",
+    "SQLiteOrderBookStore",
 ]

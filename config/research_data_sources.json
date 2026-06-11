@@ -1,0 +1,55 @@
+{
+  "connectors": [
+    {
+      "name": "research_csv",
+      "type": "csv",
+      "files_by_symbol": {
+        "AAPL": "data/research/aapl_1d.csv"
+      }
+    },
+    {
+      "name": "exchange_ccxt",
+      "type": "ccxt",
+      "timeout_ms": 30000,
+      "batch_size": 1000,
+      "max_pages": 100,
+      "max_retries": 5
+    },
+    {
+      "name": "vendor_yahoo",
+      "type": "yahoo",
+      "symbols_by_symbol": {
+        "AAPL": "AAPL",
+        "BRK.B": "BRK-B"
+      }
+    },
+    {
+      "name": "vendor_alpha_vantage",
+      "type": "alpha_vantage",
+      "api_key_env": "ALPHA_VANTAGE_API_KEY",
+      "symbols_by_symbol": {
+        "AAPL": "AAPL",
+        "BRK.B": "BRK-B"
+      }
+    },
+    {
+      "name": "vendor_polygon",
+      "type": "polygon",
+      "api_key_env": "POLYGON_API_KEY",
+      "symbols_by_symbol": {
+        "AAPL": "AAPL",
+        "BRK.B": "BRK.B"
+      }
+    }
+  ],
+  "routes": [
+    {
+      "symbol": "AAPL",
+      "exchange": "nasdaq",
+      "market_type": "equity",
+      "timeframe": "1d",
+      "source": "research_csv",
+      "limit": 250
+    }
+  ]
+}

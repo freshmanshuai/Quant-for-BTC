@@ -1,0 +1,8 @@
+signal_key,bar_time,entry_price,stop_price,target_price,score
+AAPL|tactical|breakout|long,1780315200000,105.0,95.0,125.0,99.41176470588225
+AAPL|tactical|pullback|long,1780329600000,107.0,102.0,117.0,75.76699029126213
+AAPL|tactical|meanrev|long,1780329600000,99.5,96.0,100.0,74.09090909090908
+AAPL|tactical|sweep_reversal|long,1780315200000,100.0,97.0,105.0,76.20408163265307
+AAPL|tactical|crash_short|short,1780315200000,97.0,104.0,83.0,74.47572815533981
+AAPL|tactical|failed_bounce|short,1780329600000,99.0,104.0,96.0,89.15151515151518
+AAPL|tactical|bull_trap|short,1780329600000,101.0,106.0,96.0,89.68012185833966

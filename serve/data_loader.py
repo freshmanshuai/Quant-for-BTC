@@ -12,8 +12,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from quant_platform.data import BarSeriesId
+from quant_platform.stores import MissingStorageDependency, ParquetBarStore
+
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DATA_DIR = _PROJECT_ROOT / "data"
+_BAR_STORE_DIR = _DATA_DIR / "bars"
 _RESULTS_DIR = _PROJECT_ROOT / "backtest_results" / "latest"
 
 _cache: dict[str, pd.DataFrame] = {}
@@ -33,11 +37,33 @@ def _load_csv(path: Path) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
+def _bar_series_id(timeframe: str) -> BarSeriesId:
+    return BarSeriesId(
+        symbol="BTC/USDT",
+        exchange="binance",
+        market_type="swap",
+        timeframe=timeframe,
+        source="ccxt",
+    )
+
+
+def _load_bar_store(timeframe: str) -> pd.DataFrame | None:
+    try:
+        return ParquetBarStore(_BAR_STORE_DIR).read(_bar_series_id(timeframe))
+    except (FileNotFoundError, MissingStorageDependency):
+        return None
+
+
 def get_ohlcv(timeframe: str = "4h") -> pd.DataFrame:
     """Return cached OHLCV DataFrame for the given timeframe."""
     key = f"ohlcv_{timeframe}"
     if key in _cache:
         return _cache[key]
+
+    df = _load_bar_store(timeframe)
+    if df is not None:
+        _cache[key] = df
+        return df
 
     if timeframe == "15m":
         df = _load_pickle("binance_swap_BTC_USDT_15m.pkl")

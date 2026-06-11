@@ -7,7 +7,7 @@ import pandas as pd
 
 class FeatureStoreTest(unittest.TestCase):
     def test_feature_series_id_builds_deterministic_cache_key(self):
-        from quant_platform.data import DerivativeSeriesId, ExternalMetricSeriesId, FeatureSeriesId
+        from quant_platform.data import DerivativeSeriesId, ExternalMetricSeriesId, FeatureSeriesId, OrderBookSeriesId
 
         series_id = FeatureSeriesId(
             symbol="BTC/USDT",
@@ -28,6 +28,9 @@ class FeatureStoreTest(unittest.TestCase):
 
         external_id = ExternalMetricSeriesId("BTC/USDT", "valuescan", "ai_social_sentiment", "4h", "api")
         self.assertEqual(external_id.cache_key, "api/valuescan/BTC_USDT/4h/ai_social_sentiment")
+
+        order_book_id = OrderBookSeriesId("BTC/USDT", "binance", "swap", depth=5, sample_interval="1s", source="ccxt")
+        self.assertEqual(order_book_id.cache_key, "ccxt/binance/swap/BTC_USDT/order_book/depth_5/1s")
 
     def test_parquet_feature_store_builds_deterministic_path(self):
         from quant_platform.data import FeatureSeriesId
@@ -228,6 +231,53 @@ class FeatureStoreTest(unittest.TestCase):
         self.assertEqual(len(loaded), 2)
         self.assertEqual(float(loaded.iloc[-1]["funding_rate"]), 0.0002)
         self.assertEqual(float(loaded.iloc[-1]["open_interest"]), 1100.0)
+        self.assertEqual(str(loaded.index.tz), "UTC")
+
+    def test_parquet_order_book_store_builds_deterministic_path(self):
+        from quant_platform.data import OrderBookSeriesId
+        from quant_platform.stores import ParquetOrderBookStore
+
+        store = ParquetOrderBookStore(Path("order_books"))
+        series_id = OrderBookSeriesId("BTC/USDT", "binance", "swap", depth=5, sample_interval="1s", source="ccxt")
+
+        self.assertEqual(
+            store.path_for(series_id),
+            Path("order_books")
+            / "ccxt"
+            / "binance"
+            / "swap"
+            / "BTC_USDT"
+            / "order_book"
+            / "depth_5"
+            / "1s.parquet",
+        )
+
+    def test_sqlite_order_book_store_round_trip_preserves_depth_columns_and_utc_index(self):
+        from quant_platform.data import OrderBookSeriesId
+        from quant_platform.stores import SQLiteOrderBookStore
+
+        order_book = pd.DataFrame(
+            {
+                "bid_price_1": [100.0, 100.5],
+                "bid_size_1": [1.2, 1.1],
+                "ask_price_1": [100.1, 100.6],
+                "ask_size_1": [1.4, 1.3],
+                "spread": [0.1, 0.1],
+            },
+            index=pd.to_datetime([1700000000000, 1700000001000], unit="ms", utc=True),
+        )
+        series_id = OrderBookSeriesId("BTC/USDT", "binance", "swap", depth=1, sample_interval="1s", source="ccxt")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteOrderBookStore(Path(tmp))
+            path = store.write(series_id, order_book)
+            loaded = store.read(series_id)
+
+        self.assertEqual(path.name, "1s.sqlite")
+        self.assertEqual(list(loaded.columns), ["bid_price_1", "bid_size_1", "ask_price_1", "ask_size_1", "spread"])
+        self.assertEqual(len(loaded), 2)
+        self.assertEqual(float(loaded.iloc[-1]["bid_price_1"]), 100.5)
+        self.assertEqual(float(loaded.iloc[-1]["ask_size_1"]), 1.3)
         self.assertEqual(str(loaded.index.tz), "UTC")
 
 

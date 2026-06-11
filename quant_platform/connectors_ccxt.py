@@ -163,6 +163,48 @@ class CcxtExchangeConnector(DataConnector):
 
         return funding.join(open_interest, how="outer").sort_index()
 
+    def fetch_order_book_snapshots(
+        self,
+        market: MarketSpec,
+        depth: int = 5,
+        sample_interval: str = "1s",
+        limit: int = 1000,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> pd.DataFrame:
+        if start is not None or end is not None:
+            raise ConnectorError("start/end order-book snapshot fetching is not implemented yet")
+
+        config: dict[str, Any] = {"enableRateLimit": True, "timeout": self.timeout_ms}
+        if self.proxy_url:
+            config["httpsProxy"] = self.proxy_url
+        exchange = self.exchange_factory(market.exchange, market.market_type, config)
+        order_book = exchange.fetch_order_book(market.asset.symbol, limit=depth)
+
+        timestamp_ms = order_book.get("timestamp")
+        if timestamp_ms is None:
+            timestamp = pd.Timestamp.now(tz="UTC")
+        else:
+            timestamp = pd.to_datetime(timestamp_ms, unit="ms", utc=True)
+
+        bids = order_book.get("bids") or []
+        asks = order_book.get("asks") or []
+        row: dict[str, float | None] = {}
+        for level in range(depth):
+            bid = bids[level] if level < len(bids) else None
+            row[f"bid_price_{level + 1}"] = float(bid[0]) if bid else None
+            row[f"bid_size_{level + 1}"] = float(bid[1]) if bid else None
+        for level in range(depth):
+            ask = asks[level] if level < len(asks) else None
+            row[f"ask_price_{level + 1}"] = float(ask[0]) if ask else None
+            row[f"ask_size_{level + 1}"] = float(ask[1]) if ask else None
+        row["spread"] = (
+            row["ask_price_1"] - row["bid_price_1"]
+            if row.get("ask_price_1") is not None and row.get("bid_price_1") is not None
+            else None
+        )
+        return pd.DataFrame([row], index=pd.DatetimeIndex([timestamp]))
+
     def _fetch_paginated(self, exchange, symbol: str, timeframe: str, limit: int) -> list[list]:
         all_rows: list[list] = []
         end_time: int | None = None

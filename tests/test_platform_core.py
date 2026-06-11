@@ -19,10 +19,16 @@ class PlatformCoreTest(unittest.TestCase):
             supports_short=True,
             supports_leverage=True,
             trading_session="24/7",
+            session_timezone="UTC",
+            session_open=None,
+            session_close=None,
+            trading_days=("mon", "tue", "wed", "thu", "fri", "sat", "sun"),
         )
 
         self.assertEqual(market.asset.symbol, "BTC/USDT")
         self.assertTrue(market.supports_short)
+        self.assertEqual(market.session_timezone, "UTC")
+        self.assertEqual(market.trading_days, ("mon", "tue", "wed", "thu", "fri", "sat", "sun"))
         self.assertEqual(market.market_key, "binance:swap:BTC/USDT")
 
     def test_market_spec_quantizes_price_and_quantity_to_exchange_steps(self):
@@ -45,6 +51,33 @@ class PlatformCoreTest(unittest.TestCase):
         self.assertEqual(market.quantize_quantity(0.123456), 0.123)
         self.assertEqual(unconstrained.quantize_price(123.4567), 123.4567)
         self.assertEqual(unconstrained.quantize_quantity(10.25), 10.25)
+
+    def test_market_spec_identifies_configured_trading_session_times(self):
+        from datetime import datetime
+
+        from quant_platform.core import AssetSpec, MarketSpec
+
+        regular_session = MarketSpec(
+            asset=AssetSpec(symbol="AAPL", base="AAPL", quote="USD"),
+            exchange="nasdaq",
+            market_type="equity",
+            trading_session="US_REGULAR",
+            session_timezone="America/New_York",
+            session_open="09:30",
+            session_close="16:00",
+            trading_days=("mon", "tue", "wed", "thu", "fri"),
+        )
+        crypto_session = MarketSpec(
+            asset=AssetSpec(symbol="BTC/USDT", base="BTC", quote="USDT"),
+            exchange="binance",
+            market_type="swap",
+            trading_session="24/7",
+        )
+
+        self.assertTrue(regular_session.is_trading_time(datetime.fromisoformat("2026-06-12T14:00:00+00:00")))
+        self.assertFalse(regular_session.is_trading_time(datetime.fromisoformat("2026-06-12T21:00:00+00:00")))
+        self.assertFalse(regular_session.is_trading_time(datetime.fromisoformat("2026-06-13T14:00:00+00:00")))
+        self.assertTrue(crypto_session.is_trading_time(datetime.fromisoformat("2026-06-13T14:00:00+00:00")))
 
     def test_market_catalog_registers_and_resolves_market_specs(self):
         from quant_platform.core import AssetSpec, MarketSpec
@@ -102,6 +135,8 @@ class PlatformCoreTest(unittest.TestCase):
                 "fee_rate": 0.0004,
                 "contract_multiplier": 1.0,
                 "trading_session": "24/7",
+                "session_timezone": "UTC",
+                "max_leverage": 125.0,
                 "supports_short": True,
                 "supports_leverage": True,
             },
@@ -114,6 +149,11 @@ class PlatformCoreTest(unittest.TestCase):
                 "tick_size": 0.01,
                 "lot_size": 0.001,
                 "trading_session": "US_REGULAR",
+                "session_timezone": "America/New_York",
+                "session_open": "09:30",
+                "session_close": "16:00",
+                "trading_days": ["mon", "tue", "wed", "thu", "fri"],
+                "correlation_group": "us_equity_beta",
                 "supports_short": False,
                 "supports_leverage": False,
             },
@@ -124,7 +164,13 @@ class PlatformCoreTest(unittest.TestCase):
         aapl = catalog.resolve("AAPL", exchange="nasdaq", market_type="equity")
 
         self.assertEqual(btc.fee_rate, 0.0004)
+        self.assertEqual(btc.max_leverage, 125.0)
         self.assertEqual(aapl.trading_session, "US_REGULAR")
+        self.assertEqual(aapl.session_timezone, "America/New_York")
+        self.assertEqual(aapl.session_open, "09:30")
+        self.assertEqual(aapl.session_close, "16:00")
+        self.assertEqual(aapl.trading_days, ("mon", "tue", "wed", "thu", "fri"))
+        self.assertEqual(aapl.correlation_group, "us_equity_beta")
         self.assertFalse(aapl.supports_short)
         self.assertEqual(catalog.to_records(), records)
 
@@ -311,6 +357,67 @@ class PlatformCoreTest(unittest.TestCase):
 
         with self.assertRaisesRegex(NotImplementedError, "does not support derivative data"):
             registry.fetch_derivatives("bars", market)
+
+    def test_connector_registry_routes_order_book_fetches_by_source(self):
+        import pandas as pd
+
+        from quant_platform.connectors import DataConnector, DataConnectorRegistry
+        from quant_platform.core import AssetSpec, MarketSpec
+
+        class OrderBookConnector(DataConnector):
+            name = "order_book"
+
+            def fetch_bars(self, market, timeframe, limit=None, start=None, end=None):
+                return pd.DataFrame()
+
+            def fetch_order_book_snapshots(
+                self,
+                market,
+                depth=5,
+                sample_interval="1s",
+                limit=1000,
+                start=None,
+                end=None,
+            ):
+                return pd.DataFrame(
+                    {
+                        "market": [market.market_key],
+                        "depth": [depth],
+                        "sample_interval": [sample_interval],
+                        "limit": [limit],
+                        "start": [start],
+                        "end": [end],
+                    }
+                )
+
+        class BarsOnlyConnector(DataConnector):
+            name = "bars"
+
+            def fetch_bars(self, market, timeframe, limit=None, start=None, end=None):
+                return pd.DataFrame()
+
+        market = MarketSpec(
+            asset=AssetSpec(symbol="BTC/USDT", base="BTC", quote="USDT"),
+            exchange="binance",
+            market_type="swap",
+        )
+        registry = DataConnectorRegistry([OrderBookConnector(), BarsOnlyConnector()])
+
+        df = registry.fetch_order_book_snapshots(
+            "order_book",
+            market,
+            depth=10,
+            sample_interval="500ms",
+            limit=25,
+        )
+
+        self.assertEqual(df.iloc[0]["market"], "binance:swap:BTC/USDT")
+        self.assertEqual(int(df.iloc[0]["depth"]), 10)
+        self.assertEqual(df.iloc[0]["sample_interval"], "500ms")
+        self.assertEqual(int(df.iloc[0]["limit"]), 25)
+
+        with self.assertRaisesRegex(NotImplementedError, "does not support order-book data"):
+            registry.fetch_order_book_snapshots("bars", market)
 
 
 if __name__ == "__main__":

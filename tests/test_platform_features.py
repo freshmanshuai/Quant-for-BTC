@@ -50,6 +50,33 @@ class FeatureEngineTest(unittest.TestCase):
         self.assertEqual(int(result["two"].iloc[-1]), 2)
         self.assertNotIn("one", bars.columns)
 
+    def test_default_feature_module_registry_builds_engine_from_config_records(self):
+        from quant_platform.features import default_feature_module_registry
+
+        bars = sample_bars().iloc[:8]
+        registry = default_feature_module_registry()
+        engine = registry.build_engine([
+            {
+                "type": "technical_indicators",
+                "params": {
+                    "ema_lengths": [3],
+                    "macd_fast": 3,
+                    "macd_slow": 6,
+                    "macd_signal": 2,
+                    "rsi_period": 4,
+                },
+            },
+            {"type": "donchian", "params": {"channel_periods": {"short": 3}}},
+            {"type": "volume", "params": {"lookback": 3, "zscore_column": "vol_z"}},
+            {"type": "price_action"},
+        ])
+
+        result = engine.run(bars)
+
+        for column in ["ema3", "macd_hist", "rsi_4", "short_high_3", "vol_z", "_lower_shadow"]:
+            self.assertIn(column, result.columns)
+        self.assertNotIn("ema3", bars.columns)
+
     def test_feature_engine_cache_helper_persists_output_without_mutating_input(self):
         from quant_platform.data import FeatureSeriesId
         from quant_platform.features import FeatureEngine, run_feature_engine_with_cache
@@ -83,6 +110,45 @@ class FeatureEngineTest(unittest.TestCase):
         self.assertEqual(result.cache["cacheKey"], series_id.cache_key)
         self.assertEqual(result.cache["path"], str(Path("features/api/binance/swap/BTC_USDT/4h/test.parquet")))
         self.assertEqual(result.cache["rows"], 3)
+
+    def test_feature_engine_cache_helper_reads_cached_features_without_recomputing(self):
+        from quant_platform.data import FeatureSeriesId
+        from quant_platform.features import FeatureEngine, run_feature_engine_with_cache
+
+        class ExplodingModule:
+            name = "exploding"
+
+            def apply(self, bars):
+                raise AssertionError("feature engine should not run on cache hit")
+
+        class FakeStore:
+            def __init__(self, cached):
+                self.cached = cached
+                self.read_calls = []
+                self.write_calls = []
+
+            def read(self, series_id):
+                self.read_calls.append(series_id)
+                return self.cached
+
+            def write(self, series_id, features):
+                self.write_calls.append((series_id, features.copy()))
+                return Path("features/feature_engine/nasdaq/equity/AAPL/1d/research_default_v1.parquet")
+
+        bars = sample_bars().iloc[:3]
+        cached = bars.assign(cached_feature=[1.0, 2.0, 3.0])
+        series_id = FeatureSeriesId("AAPL", "nasdaq", "equity", "1d", "feature_engine", "research_default_v1")
+        store = FakeStore(cached)
+
+        result = run_feature_engine_with_cache(FeatureEngine([ExplodingModule()]), bars, series_id=series_id, store=store)
+
+        self.assertEqual(store.read_calls, [series_id])
+        self.assertEqual(store.write_calls, [])
+        self.assertIs(result.features, cached)
+        self.assertEqual(result.cache["cacheKey"], series_id.cache_key)
+        self.assertTrue(result.cache["hit"])
+        self.assertEqual(result.cache["rows"], 3)
+        self.assertIn("cached_feature", result.cache["columns"])
 
     def test_technical_indicator_module_adds_reusable_base_columns(self):
         from quant_platform.features import TechnicalIndicatorConfig, TechnicalIndicatorModule
@@ -205,6 +271,22 @@ class FeatureEngineTest(unittest.TestCase):
         self.assertLessEqual(float(result["_atr_pct_4"].iloc[-1]), 1)
         self.assertNotIn("roll_high_5", bars.columns)
 
+    def test_volatility_feature_module_can_use_distinct_atr_and_adx_periods(self):
+        from quant_platform.features import VolatilityConfig, VolatilityFeatureModule
+
+        bars = sample_bars()
+        result = VolatilityFeatureModule(
+            VolatilityConfig(period=10, adx_period=21, percentile_lookback=30)
+        ).apply(bars)
+
+        self.assertIn("_atr_10", result.columns)
+        self.assertIn("_atr_pct_10", result.columns)
+        self.assertIn("_adx_21", result.columns)
+        self.assertNotIn("_adx_10", result.columns)
+        self.assertGreater(float(result["_atr_10"].iloc[-1]), 0)
+        self.assertGreaterEqual(float(result["_atr_pct_10"].iloc[-1]), 0)
+        self.assertLessEqual(float(result["_atr_pct_10"].iloc[-1]), 1)
+
     def test_btc_feature_engine_produces_prepare_features_market_columns(self):
         from quant_btc.config import BacktestConfig
         from quant_btc.feature_engine import build_btc_feature_engine
@@ -257,6 +339,50 @@ class FeatureEngineTest(unittest.TestCase):
         self.assertEqual(float(result["funding_rate"].iloc[5]), 0.0002)
         self.assertAlmostEqual(float(result["open_interest_change_4"].iloc[8]), 0.1)
         self.assertNotIn("funding_rate", bars.columns)
+
+    def test_order_book_feature_module_aligns_spread_and_depth_features(self):
+        from quant_platform.features import OrderBookFeatureConfig, OrderBookFeatureModule
+
+        bars = sample_bars().iloc[:6]
+        snapshots = pd.DataFrame(
+            {
+                "bid_price_1": [100.0, 102.0],
+                "bid_size_1": [2.0, 4.0],
+                "bid_price_2": [99.5, 101.5],
+                "bid_size_2": [3.0, 1.0],
+                "ask_price_1": [101.0, 103.0],
+                "ask_size_1": [1.0, 2.0],
+                "ask_price_2": [101.5, 103.5],
+                "ask_size_2": [1.0, 1.0],
+            },
+            index=bars.index[[0, 4]],
+        )
+
+        result = OrderBookFeatureModule(
+            snapshots,
+            OrderBookFeatureConfig(depth=2, prefix="book"),
+        ).apply(bars)
+
+        for col in [
+            "book_best_bid",
+            "book_best_ask",
+            "book_spread",
+            "book_mid",
+            "book_relative_spread",
+            "book_bid_size_sum_2",
+            "book_ask_size_sum_2",
+            "book_imbalance_2",
+        ]:
+            self.assertIn(col, result.columns)
+        self.assertEqual(float(result["book_best_bid"].iloc[3]), 100.0)
+        self.assertEqual(float(result["book_best_bid"].iloc[5]), 102.0)
+        self.assertEqual(float(result["book_spread"].iloc[5]), 1.0)
+        self.assertEqual(float(result["book_mid"].iloc[5]), 102.5)
+        self.assertAlmostEqual(float(result["book_relative_spread"].iloc[5]), 1.0 / 102.5)
+        self.assertEqual(float(result["book_bid_size_sum_2"].iloc[5]), 5.0)
+        self.assertEqual(float(result["book_ask_size_sum_2"].iloc[5]), 3.0)
+        self.assertEqual(float(result["book_imbalance_2"].iloc[5]), 0.25)
+        self.assertNotIn("book_spread", bars.columns)
 
     def test_external_metric_feature_module_aligns_valuescan_style_metrics(self):
         from quant_platform.features import ExternalMetricFeatureConfig, ExternalMetricFeatureModule

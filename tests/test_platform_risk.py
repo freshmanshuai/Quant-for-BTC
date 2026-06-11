@@ -76,6 +76,73 @@ class RiskEngineTest(unittest.TestCase):
         self.assertTrue(long.allowed)
         self.assertAlmostEqual(long.notional, 10_000.0)
 
+    def test_market_spec_max_leverage_caps_leveraged_notional(self):
+        from quant_platform.core import AssetSpec, MarketSpec
+        from quant_platform.risk import AccountState, RiskEngine, RiskLimits
+
+        swap_market = MarketSpec(
+            asset=AssetSpec(symbol="BTC/USDT", base="BTC", quote="USDT"),
+            exchange="binance",
+            market_type="swap",
+            supports_short=True,
+            supports_leverage=True,
+            max_leverage=1.5,
+        )
+        engine = RiskEngine(
+            RiskLimits(
+                risk_per_trade=0.50,
+                max_position_fraction=1.0,
+                max_leverage=3.0,
+                portfolio_risk_budget=1.0,
+            ),
+            markets_by_symbol={"BTC/USDT": swap_market},
+        )
+
+        decision = engine.evaluate(
+            self._signal(preferred_stop=99.0),
+            AccountState(equity=10_000.0),
+            entry_price=100.0,
+        )
+
+        self.assertTrue(decision.allowed)
+        self.assertAlmostEqual(decision.notional, 15_000.0)
+        self.assertAlmostEqual(decision.quantity, 150.0)
+        self.assertAlmostEqual(decision.risk_amount, 150.0)
+
+    def test_market_spec_contract_multiplier_scales_quantity_and_unit_risk(self):
+        from quant_platform.core import AssetSpec, MarketSpec
+        from quant_platform.risk import AccountState, RiskEngine, RiskLimits
+
+        futures_market = MarketSpec(
+            asset=AssetSpec(symbol="ES", base="ES", quote="USD"),
+            exchange="cme",
+            market_type="future",
+            contract_multiplier=100.0,
+            supports_short=True,
+            supports_leverage=True,
+        )
+        engine = RiskEngine(
+            RiskLimits(
+                risk_per_trade=0.02,
+                max_position_fraction=1.0,
+                max_leverage=1.0,
+                portfolio_risk_budget=1.0,
+            ),
+            markets_by_symbol={"ES": futures_market},
+        )
+
+        decision = engine.evaluate(
+            self._signal(symbol="ES", preferred_stop=9.0),
+            AccountState(equity=10_000.0),
+            entry_price=10.0,
+        )
+
+        self.assertTrue(decision.allowed)
+        self.assertAlmostEqual(decision.max_loss_per_unit, 100.0)
+        self.assertAlmostEqual(decision.quantity, 2.0)
+        self.assertAlmostEqual(decision.notional, 2_000.0)
+        self.assertAlmostEqual(decision.risk_amount, 200.0)
+
     def test_blocks_when_portfolio_risk_budget_is_exhausted(self):
         from quant_platform.risk import AccountState, RiskEngine, RiskLimits
 
@@ -94,6 +161,34 @@ class RiskEngineTest(unittest.TestCase):
         self.assertEqual(decision.reason, "portfolio_risk_budget_exhausted")
         self.assertEqual(decision.quantity, 0.0)
 
+    def test_budget_gates_use_capped_candidate_risk(self):
+        from quant_platform.risk import AccountState, RiskEngine, RiskLimits
+
+        engine = RiskEngine(RiskLimits(
+            risk_per_trade=0.02,
+            max_position_fraction=0.10,
+            max_leverage=1.0,
+            portfolio_risk_budget=0.10,
+            max_symbol_risk=0.10,
+            max_module_risk=0.10,
+            max_correlation_group_risk=0.10,
+            correlation_groups={"BTC/USDT": "crypto_beta"},
+        ))
+        decision = engine.evaluate(
+            self._signal(preferred_stop=95.0),
+            AccountState(equity=10_000.0),
+            entry_price=100.0,
+            open_risk=950.0,
+            open_symbol_risk={"BTC/USDT": 950.0},
+            open_module_risk={"breakout": 950.0},
+            open_group_risk={"crypto_beta": 950.0},
+        )
+
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.reason, "allowed")
+        self.assertAlmostEqual(decision.notional, 1_000.0)
+        self.assertAlmostEqual(decision.risk_amount, 50.0)
+
     def test_blocks_when_correlation_group_risk_budget_is_exhausted(self):
         from quant_platform.risk import AccountState, RiskEngine, RiskLimits
 
@@ -109,6 +204,35 @@ class RiskEngineTest(unittest.TestCase):
             entry_price=100.0,
             open_risk=100.0,
             open_group_risk={"crypto_beta": 450.0},
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "correlation_group_risk_budget_exhausted")
+
+    def test_market_spec_correlation_group_feeds_risk_budget_gate(self):
+        from quant_platform.core import AssetSpec, MarketSpec
+        from quant_platform.risk import AccountState, RiskEngine, RiskLimits
+
+        market = MarketSpec(
+            asset=AssetSpec(symbol="AAPL", base="AAPL", quote="USD"),
+            exchange="nasdaq",
+            market_type="equity",
+            correlation_group="us_equity_beta",
+        )
+        engine = RiskEngine(
+            RiskLimits(
+                risk_per_trade=0.02,
+                portfolio_risk_budget=0.20,
+                max_correlation_group_risk=0.05,
+            ),
+            markets_by_symbol={"AAPL": market},
+        )
+
+        decision = engine.evaluate(
+            self._signal(symbol="AAPL"),
+            AccountState(equity=10_000.0),
+            entry_price=100.0,
+            open_group_risk={"us_equity_beta": 450.0},
         )
 
         self.assertFalse(decision.allowed)
@@ -169,6 +293,38 @@ class RiskEngineTest(unittest.TestCase):
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason, "module_risk_budget_exhausted")
 
+    def test_budget_diagnostics_report_portfolio_symbol_module_and_group_usage(self):
+        from quant_platform.risk import AccountState, RiskEngine, RiskLimits
+
+        engine = RiskEngine(RiskLimits(
+            risk_per_trade=0.02,
+            portfolio_risk_budget=0.10,
+            max_symbol_risk=0.05,
+            max_module_risk=0.04,
+            max_correlation_group_risk=0.06,
+            correlation_groups={"BTC/USDT": "crypto_beta", "ETH/USDT": "crypto_beta"},
+        ))
+
+        diagnostics = engine.budget_diagnostics(
+            AccountState(equity=10_000.0),
+            open_risk=300.0,
+            open_symbol_risk={"BTC/USDT": 200.0, "ETH/USDT": 100.0},
+            open_module_risk={"breakout": 200.0, "pullback": 100.0},
+            open_group_risk={"crypto_beta": 300.0},
+        )
+
+        self.assertEqual(diagnostics.portfolio.used, 300.0)
+        self.assertEqual(diagnostics.portfolio.budget, 1_000.0)
+        self.assertEqual(diagnostics.portfolio.remaining, 700.0)
+        self.assertEqual(diagnostics.portfolio.utilization, 0.3)
+        self.assertEqual(diagnostics.symbols["BTC/USDT"].budget, 500.0)
+        self.assertEqual(diagnostics.symbols["BTC/USDT"].remaining, 300.0)
+        self.assertEqual(diagnostics.modules["breakout"].budget, 400.0)
+        self.assertEqual(diagnostics.correlation_groups["crypto_beta"].budget, 600.0)
+        self.assertEqual(diagnostics.correlation_groups["crypto_beta"].utilization, 0.5)
+        self.assertEqual(diagnostics.target_risk_amount, 200.0)
+        self.assertFalse(diagnostics.paused)
+
     def test_blocks_during_daily_or_weekly_circuit_breaker(self):
         from quant_platform.risk import AccountState, RiskEngine, RiskLimits
 
@@ -189,6 +345,51 @@ class RiskEngineTest(unittest.TestCase):
         self.assertEqual(daily.reason, "daily_drawdown_limit")
         self.assertFalse(weekly.allowed)
         self.assertEqual(weekly.reason, "weekly_drawdown_limit")
+
+    def test_blocks_when_portfolio_max_drawdown_limit_is_reached(self):
+        from quant_platform.risk import AccountState, RiskEngine, RiskLimits, RiskState
+
+        engine = RiskEngine(
+            RiskLimits(max_drawdown_pct=0.10),
+            state=RiskState(equity_peak=12_000.0),
+        )
+
+        decision = engine.evaluate(
+            self._signal(),
+            AccountState(equity=10_700.0),
+            entry_price=100.0,
+        )
+        diagnostics = engine.budget_diagnostics(AccountState(equity=10_700.0)).to_dict()
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "max_drawdown_limit")
+        self.assertAlmostEqual(diagnostics["drawdown"]["equityPeak"], 12_000.0)
+        self.assertAlmostEqual(diagnostics["drawdown"]["currentPct"], 1300.0 / 12_000.0)
+        self.assertAlmostEqual(diagnostics["drawdown"]["limitPct"], 0.10)
+        self.assertTrue(diagnostics["drawdown"]["breached"])
+
+    def test_max_drawdown_gate_tracks_equity_peak_from_evaluations(self):
+        from quant_platform.risk import AccountState, RiskEngine, RiskLimits
+
+        engine = RiskEngine(RiskLimits(max_drawdown_pct=0.10))
+
+        first = engine.evaluate(
+            self._signal(),
+            AccountState(equity=12_000.0),
+            entry_price=100.0,
+        )
+        blocked = engine.evaluate(
+            self._signal(),
+            AccountState(equity=10_700.0),
+            entry_price=100.0,
+        )
+        diagnostics = engine.budget_diagnostics(AccountState(equity=10_700.0)).to_dict()
+
+        self.assertTrue(first.allowed)
+        self.assertFalse(blocked.allowed)
+        self.assertEqual(blocked.reason, "max_drawdown_limit")
+        self.assertAlmostEqual(diagnostics["drawdown"]["equityPeak"], 12_000.0)
+        self.assertAlmostEqual(diagnostics["drawdown"]["currentPct"], 1300.0 / 12_000.0)
 
     def test_reduces_size_after_consecutive_losses_and_pauses_after_limit(self):
         from quant_platform.risk import AccountState, RiskEngine, RiskLimits, RiskState

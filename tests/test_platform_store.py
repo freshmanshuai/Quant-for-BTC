@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import sqlite3
 from pathlib import Path
 
 import pandas as pd
@@ -84,6 +85,76 @@ class BarStoreTest(unittest.TestCase):
         self.assertEqual(len(loaded), 2)
         self.assertEqual(float(loaded.iloc[-1]["Close"]), 106.0)
         self.assertEqual(str(loaded.index.tz), "UTC")
+
+    def test_sqlite_bar_store_preserves_optional_turnover_column(self):
+        from quant_platform.data import BarSeriesId
+        from quant_platform.stores import SQLiteBarStore
+
+        bars = pd.DataFrame(
+            {
+                "Open": [100.0, 101.0],
+                "High": [110.0, 111.0],
+                "Low": [90.0, 91.0],
+                "Close": [105.0, 106.0],
+                "Volume": [10.0, 11.0],
+                "Turnover": [1050.0, 1166.0],
+            },
+            index=pd.to_datetime([1700000000000, 1700003600000], unit="ms", utc=True),
+        )
+        series_id = BarSeriesId("ETH/USDT", "local", "spot", "1h", "csv")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteBarStore(Path(tmp))
+            store.write(series_id, bars)
+            loaded = store.read(series_id)
+
+        self.assertEqual(list(loaded.columns), ["Open", "High", "Low", "Close", "Volume", "Turnover"])
+        self.assertEqual(float(loaded.iloc[-1]["Turnover"]), 1166.0)
+
+    def test_sqlite_bar_store_upgrades_existing_ohlcv_schema_for_turnover(self):
+        from quant_platform.data import BarSeriesId
+        from quant_platform.stores import SQLiteBarStore
+
+        series_id = BarSeriesId("ETH/USDT", "local", "spot", "1h", "csv")
+        bars = pd.DataFrame(
+            {
+                "Open": [101.0],
+                "High": [111.0],
+                "Low": [91.0],
+                "Close": [106.0],
+                "Volume": [11.0],
+                "Turnover": [1166.0],
+            },
+            index=pd.to_datetime([1700003600000], unit="ms", utc=True),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteBarStore(Path(tmp))
+            path = store.path_for(series_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(path)
+            try:
+                conn.execute(
+                    """
+                    CREATE TABLE bars (
+                        timestamp TEXT PRIMARY KEY,
+                        open REAL NOT NULL,
+                        high REAL NOT NULL,
+                        low REAL NOT NULL,
+                        close REAL NOT NULL,
+                        volume REAL NOT NULL
+                    )
+                    """
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            store.write(series_id, bars)
+            loaded = store.read(series_id)
+
+        self.assertEqual(list(loaded.columns), ["Open", "High", "Low", "Close", "Volume", "Turnover"])
+        self.assertEqual(float(loaded.iloc[0]["Turnover"]), 1166.0)
 
 
 if __name__ == "__main__":

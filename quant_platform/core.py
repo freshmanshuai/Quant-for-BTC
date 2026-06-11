@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, time
 from decimal import Decimal, ROUND_FLOOR
+from zoneinfo import ZoneInfo
 
 
 @dataclass(frozen=True)
@@ -28,8 +30,14 @@ class MarketSpec:
     funding_rate: float | None = None
     contract_multiplier: float = 1.0
     trading_session: str = "24/7"
+    session_timezone: str | None = None
+    session_open: str | None = None
+    session_close: str | None = None
+    trading_days: tuple[str, ...] = ()
+    correlation_group: str | None = None
     supports_short: bool = False
     supports_leverage: bool = False
+    max_leverage: float | None = None
 
     @property
     def market_key(self) -> str:
@@ -41,6 +49,30 @@ class MarketSpec:
     def quantize_quantity(self, quantity: float) -> float:
         return _floor_to_step(quantity, self.lot_size)
 
+    def is_trading_time(self, timestamp: datetime) -> bool:
+        """Return whether a UTC timestamp falls inside this market's configured session."""
+        if str(self.trading_session).lower() in {"24/7", "24x7", "always"}:
+            return True
+        if not self.trading_days and not (self.session_open and self.session_close):
+            return True
+
+        dt = _coerce_datetime(timestamp)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+        local_dt = dt.astimezone(ZoneInfo(self.session_timezone or "UTC"))
+
+        if self.trading_days and _weekday_name(local_dt) not in {day.lower() for day in self.trading_days}:
+            return False
+        if not (self.session_open and self.session_close):
+            return True
+
+        open_time = _parse_session_time(self.session_open)
+        close_time = _parse_session_time(self.session_close)
+        current_time = local_dt.time().replace(tzinfo=None)
+        if open_time <= close_time:
+            return open_time <= current_time < close_time
+        return current_time >= open_time or current_time < close_time
+
 
 def _floor_to_step(value: float, step: float | None) -> float:
     if step is None:
@@ -50,3 +82,18 @@ def _floor_to_step(value: float, step: float | None) -> float:
         return value
     value_decimal = Decimal(str(value))
     return float((value_decimal / step_decimal).to_integral_value(rounding=ROUND_FLOOR) * step_decimal)
+
+
+def _coerce_datetime(value: datetime) -> datetime:
+    if hasattr(value, "to_pydatetime"):
+        return value.to_pydatetime()
+    return value
+
+
+def _weekday_name(value: datetime) -> str:
+    return ("mon", "tue", "wed", "thu", "fri", "sat", "sun")[value.weekday()]
+
+
+def _parse_session_time(value: str) -> time:
+    hour, minute = value.split(":", 1)
+    return time(int(hour), int(minute))

@@ -66,6 +66,45 @@ class SignalPreviewRoutesTest(unittest.TestCase):
         self.assertEqual(payload["orders"][0]["action"], "open")
         preview.assert_called_once_with(timeframe="4h", symbol="BTC/USDT", equity=15_000.0)
 
+    @patch("serve.app.get_btc_latest_signal_snapshot")
+    def test_signal_latest_route_returns_standardized_pipeline_snapshot(self, latest):
+        latest.return_value = {
+            "mode": "latest",
+            "readOnly": True,
+            "symbol": "BTC/USDT",
+            "timeframe": "4h",
+            "signalCount": 1,
+            "riskDecisionCount": 1,
+            "orderCount": 1,
+            "deliveryCount": 1,
+            "signals": [{"module": "breakout", "direction": "long"}],
+            "riskDecisions": [{"allowed": True, "reason": "allowed"}],
+            "orders": [{"action": "open", "symbol": "BTC/USDT"}],
+            "deliveries": [{"channel": "dashboard", "ok": True}],
+            "riskDiagnostics": {"portfolio": {"used": 200.0}},
+        }
+
+        response = self.client.get("/api/signals/latest?timeframe=4h&symbol=BTC/USDT&equity=15000")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["mode"], "latest")
+        self.assertTrue(payload["readOnly"])
+        self.assertEqual(payload["riskDecisionCount"], 1)
+        latest.assert_called_once_with(timeframe="4h", symbol="BTC/USDT", equity=15_000.0)
+
+    def test_signal_markets_route_returns_configured_market_options(self):
+        response = self.client.get("/api/signals/markets")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        markets = {
+            (row["symbol"], row["exchange"], row["marketType"])
+            for row in payload["markets"]
+        }
+        self.assertIn(("BTC/USDT", "binance", "swap"), markets)
+        self.assertIn(("AAPL", "nasdaq", "equity"), markets)
+
     @patch("serve.app.get_signal_research_preview")
     def test_signal_research_preview_route_accepts_market_selection(self, preview):
         preview.return_value = {
@@ -84,7 +123,7 @@ class SignalPreviewRoutesTest(unittest.TestCase):
         }
 
         response = self.client.get(
-            "/api/signals/research-preview?timeframe=1d&symbol=AAPL&exchange=nasdaq&market_type=equity&equity=15000"
+            "/api/signals/research-preview?timeframe=1d&symbol=AAPL&exchange=nasdaq&market_type=equity&equity=15000&refresh_features=true&refresh_bars=true"
         )
 
         self.assertEqual(response.status_code, 200)
@@ -98,7 +137,86 @@ class SignalPreviewRoutesTest(unittest.TestCase):
         self.assertEqual(kwargs["exchange"], "nasdaq")
         self.assertEqual(kwargs["market_type"], "equity")
         self.assertEqual(kwargs["equity"], 15_000.0)
-        self.assertIn("load_ohlcv", kwargs)
+        self.assertTrue(kwargs["refresh_features"])
+        self.assertTrue(kwargs["refresh_bars"])
+        self.assertNotIn("load_ohlcv", kwargs)
+
+    @patch("serve.app.get_signal_research_event_backtest_preview")
+    def test_signal_research_event_backtest_preview_route_accepts_market_selection(self, preview):
+        preview.return_value = {
+            "symbol": "AAPL",
+            "timeframe": "1d",
+            "market": {"exchange": "nasdaq", "marketType": "equity"},
+            "regimeProfile": {"trendEmaLength": 50},
+            "rows": 4,
+            "stepCount": 4,
+            "tradeCount": 1,
+            "summary": {"finalEquity": 10400.0},
+            "orders": [],
+            "trades": [],
+            "equityCurve": [],
+            "exposureCurve": [],
+            "attribution": {"bySymbol": {}, "byLayer": {}, "byModule": {}},
+        }
+
+        response = self.client.get(
+            "/api/signals/research-event-backtest-preview?timeframe=1d&symbol=AAPL&exchange=nasdaq&market_type=equity&equity=15000&refresh_features=true&refresh_bars=true&intrabar_entry_limit=true&max_entry_order_age_bars=1&max_exit_order_age_bars=2&max_exit_fill_fraction_per_bar=0.5&max_exit_volume_fraction_per_bar=0.1&entry_spread_feature=order_book_spread&exit_spread_feature=order_book_spread"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["market"]["exchange"], "nasdaq")
+        self.assertEqual(payload["tradeCount"], 1)
+        preview.assert_called_once()
+        kwargs = preview.call_args.kwargs
+        self.assertEqual(kwargs["timeframe"], "1d")
+        self.assertEqual(kwargs["symbol"], "AAPL")
+        self.assertEqual(kwargs["exchange"], "nasdaq")
+        self.assertEqual(kwargs["market_type"], "equity")
+        self.assertEqual(kwargs["equity"], 15_000.0)
+        self.assertTrue(kwargs["refresh_features"])
+        self.assertTrue(kwargs["refresh_bars"])
+        self.assertTrue(kwargs["execution"].intrabar_entry_limit)
+        self.assertEqual(kwargs["execution"].max_entry_order_age_bars, 1)
+        self.assertEqual(kwargs["execution"].max_exit_order_age_bars, 2)
+        self.assertEqual(kwargs["execution"].max_exit_fill_fraction_per_bar, 0.5)
+        self.assertEqual(kwargs["execution"].max_exit_volume_fraction_per_bar, 0.1)
+        self.assertEqual(kwargs["execution"].entry_spread_feature, "order_book_spread")
+        self.assertEqual(kwargs["execution"].exit_spread_feature, "order_book_spread")
+
+    @patch("serve.app.get_signal_research_event_backtest_preview")
+    def test_signal_research_event_backtest_preview_route_accepts_market_lists(self, preview):
+        preview.return_value = {
+            "symbols": ["AAPL", "MSFT"],
+            "timeframe": "1d",
+            "markets": {
+                "AAPL": {"exchange": "nasdaq", "marketType": "equity"},
+                "MSFT": {"exchange": "nasdaq", "marketType": "equity"},
+            },
+            "rows": 6,
+            "stepCount": 6,
+            "tradeCount": 0,
+            "summary": {"finalEquity": 15000.0},
+            "orders": [],
+            "trades": [],
+            "equityCurve": [],
+            "exposureCurve": [],
+            "attribution": {"bySymbol": {}, "byLayer": {}, "byModule": {}},
+        }
+
+        response = self.client.get(
+            "/api/signals/research-event-backtest-preview?timeframe=1d&symbol=AAPL,MSFT&exchange=nasdaq,nasdaq&market_type=equity,equity&equity=15000"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["symbols"], ["AAPL", "MSFT"])
+        preview.assert_called_once()
+        kwargs = preview.call_args.kwargs
+        self.assertEqual(kwargs["symbol"], ["AAPL", "MSFT"])
+        self.assertEqual(kwargs["exchange"], ["nasdaq", "nasdaq"])
+        self.assertEqual(kwargs["market_type"], ["equity", "equity"])
+        self.assertEqual(kwargs["equity"], 15_000.0)
 
     @patch("serve.app.get_btc_event_backtest_preview")
     def test_signal_event_backtest_preview_route_returns_event_driven_results(self, preview):
@@ -129,6 +247,7 @@ class SignalPreviewRoutesTest(unittest.TestCase):
             "timeframe": "4h",
             "legacy": {"tradeCount": 10},
             "event": {"tradeCount": 8},
+            "riskAudit": {"auditCount": 2, "wouldBlockIfEnforcedCount": 1},
             "delta": {"tradeCount": -2},
         }
 
@@ -137,6 +256,7 @@ class SignalPreviewRoutesTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertEqual(payload["delta"]["tradeCount"], -2)
+        self.assertEqual(payload["riskAudit"]["wouldBlockIfEnforcedCount"], 1)
         preview.assert_called_once_with(timeframe="4h", symbol="BTC/USDT", equity=30_000.0)
 
 

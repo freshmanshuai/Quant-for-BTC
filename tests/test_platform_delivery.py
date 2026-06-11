@@ -1,4 +1,7 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from quant_platform.portfolio import OrderAction, OrderStatus, PortfolioOrder
 from quant_platform.risk import RiskDecision
@@ -140,6 +143,46 @@ class SignalDeliveryTest(unittest.TestCase):
         self.assertEqual(len(issues), 2)
         self.assertIn("entry_price expected=100.0 actual=100.25", issues[0])
         self.assertIn("score expected=82.0 actual=81.0", issues[1])
+
+    def test_pine_golden_vector_artifact_round_trips_and_compares_observed_csv(self):
+        from quant_platform.delivery import (
+            PineGoldenVector,
+            compare_pine_golden_vector_files,
+            load_pine_golden_vectors_json,
+            write_pine_golden_vectors_json,
+        )
+
+        vector = PineGoldenVector.from_order(self._order(), bar_time="2026-06-03T08:00:00Z")
+        with tempfile.TemporaryDirectory() as tmp:
+            expected_path = Path(tmp) / "expected_vectors.json"
+            observed_path = Path(tmp) / "pine_observed.csv"
+
+            write_pine_golden_vectors_json(expected_path, [vector])
+            self.assertEqual(
+                json.loads(expected_path.read_text(encoding="utf-8")),
+                [vector.to_dict()],
+            )
+            self.assertEqual(
+                [loaded.to_dict() for loaded in load_pine_golden_vectors_json(expected_path)],
+                [vector.to_dict()],
+            )
+
+            observed_path.write_text(
+                "\n".join([
+                    "signal_key,bar_time,entry_price,stop_price,target_price,score",
+                    "BTC/USDT|tactical|breakout|long,2026-06-03T08:00:00Z,100.0,95.0,120.0,81.0",
+                ]),
+                encoding="utf-8",
+            )
+            issues = compare_pine_golden_vector_files(expected_path, observed_path, tolerance=0.01)
+
+        self.assertEqual(
+            issues,
+            [
+                "BTC/USDT|tactical|breakout|long 2026-06-03T08:00:00Z: "
+                "score expected=82.0 actual=81.0"
+            ],
+        )
 
 
 if __name__ == "__main__":

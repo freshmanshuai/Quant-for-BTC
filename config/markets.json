@@ -8,8 +8,13 @@
       "market_type": "swap",
       "tick_size": 0.1,
       "lot_size": 0.001,
+      "trading_session": "24/7",
+      "session_timezone": "UTC",
+      "trading_days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+      "correlation_group": "crypto_beta",
       "supports_short": true,
-      "supports_leverage": true
+      "supports_leverage": true,
+      "max_leverage": 125.0
     },
     {
       "symbol": "AAPL",
@@ -20,6 +25,11 @@
       "tick_size": 0.01,
       "lot_size": 0.001,
       "trading_session": "US_REGULAR",
+      "session_timezone": "America/New_York",
+      "session_open": "09:30",
+      "session_close": "16:00",
+      "trading_days": ["mon", "tue", "wed", "thu", "fri"],
+      "correlation_group": "us_equity_beta",
       "supports_short": false,
       "supports_leverage": false
     }

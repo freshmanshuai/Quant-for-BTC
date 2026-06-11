@@ -1,0 +1,53 @@
+{
+  "default_module_set": "research_default",
+  "module_sets": [
+    {
+      "name": "research_default",
+      "modules": [
+        {
+          "type": "breakout",
+          "params": {
+            "lookback": 3
+          }
+        },
+        {
+          "type": "pullback",
+          "params": {
+            "ema_length": 3
+          }
+        },
+        {
+          "type": "mean_reversion",
+          "params": {
+            "lookback": 3,
+            "std_mult": 1.0
+          }
+        },
+        {
+          "type": "sweep_reversal",
+          "params": {
+            "lookback": 3
+          }
+        },
+        {
+          "type": "crash_short",
+          "params": {
+            "lookback": 3
+          }
+        },
+        {
+          "type": "failed_bounce",
+          "params": {
+            "lookback": 3
+          }
+        },
+        {
+          "type": "bull_trap",
+          "params": {
+            "lookback": 3
+          }
+        }
+      ]
+    }
+  ]
+}

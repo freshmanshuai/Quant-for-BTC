@@ -1,0 +1,33 @@
+{
+  "channels": [
+    {
+      "type": "memory",
+      "channel": "dashboard"
+    },
+    {
+      "type": "webhook",
+      "enabled": false,
+      "url_env": "SIGNAL_WEBHOOK_URL",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "header_env": {
+        "Authorization": "SIGNAL_WEBHOOK_AUTH"
+      }
+    },
+    {
+      "type": "telegram",
+      "enabled": false,
+      "bot_token_env": "SIGNAL_TELEGRAM_TOKEN",
+      "chat_id_env": "SIGNAL_TELEGRAM_CHAT"
+    },
+    {
+      "type": "email",
+      "enabled": false,
+      "from_address": "signals@example.test",
+      "to_addresses": [
+        "ops@example.test"
+      ]
+    }
+  ]
+}

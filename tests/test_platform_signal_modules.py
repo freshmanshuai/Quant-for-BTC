@@ -73,6 +73,484 @@ class SignalModuleTest(unittest.TestCase):
 
         self.assertEqual([signal.module for signal in signals], ["a", "b"])
 
+    def test_default_signal_module_registry_builds_runner_from_config_records(self):
+        from quant_platform.signal_modules import default_signal_module_registry
+        from quant_platform.signals import Direction
+
+        features = pd.DataFrame(
+            {
+                "Open": [94.0, 98.0, 101.0, 104.0],
+                "High": [100.0, 102.0, 105.0, 107.0],
+                "Low": [90.0, 92.0, 95.0, 103.0],
+                "Close": [95.0, 101.0, 104.0, 106.0],
+                "Volume": [100.0, 110.0, 120.0, 130.0],
+            },
+            index=pd.date_range("2026-06-01", periods=4, freq="D", tz="UTC"),
+        )
+        runner = default_signal_module_registry().build_runner([
+            {
+                "type": "breakout",
+                "params": {
+                    "module": "daily_breakout",
+                    "lookback": 3,
+                    "timeframe": "1d",
+                    "allow_short": False,
+                },
+            },
+            {
+                "type": "pullback",
+                "params": {
+                    "module": "daily_pullback",
+                    "ema_length": 3,
+                    "timeframe": "1d",
+                    "allow_short": False,
+                },
+            },
+        ])
+
+        signals = runner.generate(features, symbol="AAPL")
+
+        self.assertEqual([signal.module for signal in signals], ["daily_breakout"])
+        self.assertEqual(signals[0].direction, Direction.LONG)
+        self.assertEqual(signals[0].required_data, ("ohlcv:1d",))
+
+    def test_breakout_signal_module_computes_current_long_signal_from_ohlcv(self):
+        from quant_platform import BreakoutSignalConfig, BreakoutSignalModule
+        from quant_platform.signals import Direction
+
+        features = pd.DataFrame(
+            {
+                "Open": [94.0, 98.0, 101.0, 104.0],
+                "High": [100.0, 102.0, 105.0, 107.0],
+                "Low": [90.0, 92.0, 95.0, 103.0],
+                "Close": [95.0, 101.0, 104.0, 106.0],
+                "Volume": [100.0, 110.0, 120.0, 130.0],
+            },
+            index=pd.date_range("2026-06-01", periods=4, freq="D", tz="UTC"),
+        )
+
+        signals = BreakoutSignalModule(
+            BreakoutSignalConfig(lookback=3, timeframe="1d", risk_reward=2.0)
+        ).generate(features, symbol="AAPL")
+
+        self.assertEqual(len(signals), 1)
+        signal = signals[0]
+        self.assertEqual(signal.module, "breakout")
+        self.assertEqual(signal.symbol, "AAPL")
+        self.assertEqual(signal.direction, Direction.LONG)
+        self.assertEqual(signal.preferred_stop, 90.0)
+        self.assertEqual(signal.preferred_target, 138.0)
+        self.assertEqual(signal.required_data, ("ohlcv:1d",))
+        self.assertGreater(signal.score, 70.0)
+        self.assertGreater(signal.confidence, 0.70)
+        self.assertNotIn("breakout_long", features.columns)
+
+    def test_breakout_signal_module_returns_no_signal_without_current_breakout(self):
+        from quant_platform.signal_modules import BreakoutSignalConfig, BreakoutSignalModule
+
+        features = pd.DataFrame(
+            {
+                "Open": [94.0, 98.0, 101.0, 104.0],
+                "High": [100.0, 102.0, 105.0, 107.0],
+                "Low": [90.0, 92.0, 95.0, 103.0],
+                "Close": [95.0, 101.0, 104.0, 104.5],
+                "Volume": [100.0, 110.0, 120.0, 130.0],
+            },
+            index=pd.date_range("2026-06-01", periods=4, freq="D", tz="UTC"),
+        )
+
+        signals = BreakoutSignalModule(BreakoutSignalConfig(lookback=3, timeframe="1d")).generate(
+            features,
+            symbol="AAPL",
+        )
+
+        self.assertEqual(signals, [])
+
+    def test_pullback_signal_module_computes_current_long_signal_from_ohlcv(self):
+        from quant_platform import PullbackSignalConfig, PullbackSignalModule
+        from quant_platform.signals import Direction
+
+        features = pd.DataFrame(
+            {
+                "Open": [100.0, 104.0, 103.0, 105.0],
+                "High": [101.0, 106.0, 104.0, 107.0],
+                "Low": [99.0, 104.0, 100.0, 105.0],
+                "Close": [100.0, 105.0, 102.0, 106.0],
+                "Volume": [100.0, 120.0, 140.0, 160.0],
+            },
+            index=pd.date_range("2026-06-01", periods=4, freq="D", tz="UTC"),
+        )
+
+        signals = PullbackSignalModule(
+            PullbackSignalConfig(ema_length=3, timeframe="1d", risk_reward=2.0)
+        ).generate(features, symbol="AAPL")
+
+        self.assertEqual(len(signals), 1)
+        signal = signals[0]
+        self.assertEqual(signal.module, "pullback")
+        self.assertEqual(signal.symbol, "AAPL")
+        self.assertEqual(signal.direction, Direction.LONG)
+        self.assertEqual(signal.preferred_stop, 100.0)
+        self.assertEqual(signal.preferred_target, 118.0)
+        self.assertEqual(signal.required_data, ("ohlcv:1d",))
+        self.assertGreater(signal.score, 68.0)
+        self.assertGreater(signal.confidence, 0.68)
+        self.assertNotIn("ema3", features.columns)
+
+    def test_pullback_signal_module_computes_current_short_signal_from_ohlcv(self):
+        from quant_platform import PullbackSignalConfig, PullbackSignalModule
+        from quant_platform.signals import Direction
+
+        features = pd.DataFrame(
+            {
+                "Open": [110.0, 106.0, 107.0, 105.0],
+                "High": [111.0, 106.0, 110.0, 105.0],
+                "Low": [109.0, 104.0, 107.0, 103.0],
+                "Close": [110.0, 105.0, 108.0, 104.0],
+                "Volume": [100.0, 120.0, 140.0, 160.0],
+            },
+            index=pd.date_range("2026-06-01", periods=4, freq="D", tz="UTC"),
+        )
+
+        signals = PullbackSignalModule(
+            PullbackSignalConfig(ema_length=3, timeframe="1d", risk_reward=2.0)
+        ).generate(features, symbol="BTC/USDT")
+
+        self.assertEqual(len(signals), 1)
+        signal = signals[0]
+        self.assertEqual(signal.direction, Direction.SHORT)
+        self.assertEqual(signal.preferred_stop, 110.0)
+        self.assertEqual(signal.preferred_target, 92.0)
+        self.assertEqual(signal.required_data, ("ohlcv:1d",))
+
+    def test_pullback_signal_module_returns_no_signal_without_prior_pullback(self):
+        from quant_platform.signal_modules import PullbackSignalConfig, PullbackSignalModule
+
+        features = pd.DataFrame(
+            {
+                "Open": [100.0, 101.0, 103.0, 105.0],
+                "High": [101.0, 103.0, 105.0, 107.0],
+                "Low": [99.0, 100.0, 102.0, 104.0],
+                "Close": [100.0, 102.0, 104.0, 106.0],
+                "Volume": [100.0, 120.0, 140.0, 160.0],
+            },
+            index=pd.date_range("2026-06-01", periods=4, freq="D", tz="UTC"),
+        )
+
+        signals = PullbackSignalModule(PullbackSignalConfig(ema_length=3, timeframe="1d")).generate(
+            features,
+            symbol="AAPL",
+        )
+
+        self.assertEqual(signals, [])
+
+    def test_mean_reversion_signal_module_computes_current_long_signal_from_ohlcv(self):
+        from quant_platform import MeanReversionSignalConfig, MeanReversionSignalModule
+        from quant_platform.signals import Direction
+
+        features = pd.DataFrame(
+            {
+                "Open": [110.0, 100.0, 95.0, 94.0],
+                "High": [111.0, 101.0, 96.0, 96.0],
+                "Low": [109.0, 99.0, 94.0, 93.0],
+                "Close": [110.0, 100.0, 95.0, 95.5],
+                "Volume": [100.0, 120.0, 140.0, 160.0],
+            },
+            index=pd.date_range("2026-06-01", periods=4, freq="D", tz="UTC"),
+        )
+
+        signals = MeanReversionSignalModule(
+            MeanReversionSignalConfig(lookback=3, std_mult=1.0, timeframe="1d")
+        ).generate(features, symbol="AAPL")
+
+        self.assertEqual(len(signals), 1)
+        signal = signals[0]
+        self.assertEqual(signal.module, "meanrev")
+        self.assertEqual(signal.symbol, "AAPL")
+        self.assertEqual(signal.direction, Direction.LONG)
+        self.assertEqual(signal.preferred_stop, 93.0)
+        self.assertAlmostEqual(signal.preferred_target, 101.66666666666667)
+        self.assertEqual(signal.required_data, ("ohlcv:1d",))
+        self.assertGreater(signal.score, 65.0)
+        self.assertGreater(signal.confidence, 0.65)
+        self.assertNotIn("meanrev_long", features.columns)
+
+    def test_mean_reversion_signal_module_computes_current_short_signal_from_ohlcv(self):
+        from quant_platform import MeanReversionSignalConfig, MeanReversionSignalModule
+        from quant_platform.signals import Direction
+
+        features = pd.DataFrame(
+            {
+                "Open": [90.0, 100.0, 105.0, 106.0],
+                "High": [91.0, 101.0, 106.0, 107.0],
+                "Low": [89.0, 99.0, 104.0, 105.0],
+                "Close": [90.0, 100.0, 105.0, 105.5],
+                "Volume": [100.0, 120.0, 140.0, 160.0],
+            },
+            index=pd.date_range("2026-06-01", periods=4, freq="D", tz="UTC"),
+        )
+
+        signals = MeanReversionSignalModule(
+            MeanReversionSignalConfig(lookback=3, std_mult=1.0, timeframe="1d")
+        ).generate(features, symbol="BTC/USDT")
+
+        self.assertEqual(len(signals), 1)
+        signal = signals[0]
+        self.assertEqual(signal.direction, Direction.SHORT)
+        self.assertEqual(signal.preferred_stop, 107.0)
+        self.assertAlmostEqual(signal.preferred_target, 98.33333333333333)
+        self.assertEqual(signal.required_data, ("ohlcv:1d",))
+
+    def test_mean_reversion_signal_module_returns_no_signal_without_band_reclaim(self):
+        from quant_platform.signal_modules import MeanReversionSignalConfig, MeanReversionSignalModule
+
+        features = pd.DataFrame(
+            {
+                "Open": [110.0, 100.0, 95.0, 96.0],
+                "High": [111.0, 101.0, 96.0, 97.0],
+                "Low": [109.0, 99.0, 94.0, 95.0],
+                "Close": [110.0, 100.0, 95.0, 96.0],
+                "Volume": [100.0, 120.0, 140.0, 160.0],
+            },
+            index=pd.date_range("2026-06-01", periods=4, freq="D", tz="UTC"),
+        )
+
+        signals = MeanReversionSignalModule(
+            MeanReversionSignalConfig(lookback=3, std_mult=1.0, timeframe="1d")
+        ).generate(features, symbol="AAPL")
+
+        self.assertEqual(signals, [])
+
+    def test_sweep_reversal_signal_module_computes_current_long_signal_from_ohlcv(self):
+        from quant_platform import SweepReversalSignalConfig, SweepReversalSignalModule
+        from quant_platform.signals import Direction
+
+        features = pd.DataFrame(
+            {
+                "Open": [119.0, 110.0, 100.0, 99.0],
+                "High": [121.0, 112.0, 102.0, 101.0],
+                "Low": [118.0, 108.0, 99.0, 98.5],
+                "Close": [120.0, 110.0, 100.0, 99.5],
+                "Volume": [100.0, 120.0, 140.0, 160.0],
+            },
+            index=pd.date_range("2026-06-01", periods=4, freq="D", tz="UTC"),
+        )
+
+        signals = SweepReversalSignalModule(
+            SweepReversalSignalConfig(lookback=3, timeframe="1d")
+        ).generate(features, symbol="AAPL")
+
+        self.assertEqual(len(signals), 1)
+        signal = signals[0]
+        self.assertEqual(signal.module, "sweep_reversal")
+        self.assertEqual(signal.symbol, "AAPL")
+        self.assertEqual(signal.direction, Direction.LONG)
+        self.assertEqual(signal.preferred_stop, 98.5)
+        self.assertEqual(signal.preferred_target, 121.0)
+        self.assertEqual(signal.required_data, ("ohlcv:1d",))
+        self.assertGreater(signal.score, 66.0)
+        self.assertGreater(signal.confidence, 0.66)
+        self.assertNotIn("_sweep_signal_long", features.columns)
+
+    def test_sweep_reversal_signal_module_computes_current_short_signal_from_ohlcv(self):
+        from quant_platform import SweepReversalSignalConfig, SweepReversalSignalModule
+        from quant_platform.signals import Direction
+
+        features = pd.DataFrame(
+            {
+                "Open": [90.0, 100.0, 102.0, 102.5],
+                "High": [91.0, 101.0, 102.0, 103.5],
+                "Low": [89.0, 99.0, 100.0, 101.0],
+                "Close": [90.0, 100.0, 101.0, 101.5],
+                "Volume": [100.0, 120.0, 140.0, 160.0],
+            },
+            index=pd.date_range("2026-06-01", periods=4, freq="D", tz="UTC"),
+        )
+
+        signals = SweepReversalSignalModule(
+            SweepReversalSignalConfig(lookback=3, timeframe="1d")
+        ).generate(features, symbol="BTC/USDT")
+
+        self.assertEqual(len(signals), 1)
+        signal = signals[0]
+        self.assertEqual(signal.direction, Direction.SHORT)
+        self.assertEqual(signal.preferred_stop, 103.5)
+        self.assertEqual(signal.preferred_target, 89.0)
+        self.assertEqual(signal.required_data, ("ohlcv:1d",))
+
+    def test_sweep_reversal_signal_module_returns_no_signal_without_reclaim(self):
+        from quant_platform.signal_modules import SweepReversalSignalConfig, SweepReversalSignalModule
+
+        features = pd.DataFrame(
+            {
+                "Open": [119.0, 110.0, 100.0, 99.0],
+                "High": [121.0, 112.0, 102.0, 100.0],
+                "Low": [118.0, 108.0, 99.0, 98.5],
+                "Close": [120.0, 110.0, 100.0, 98.8],
+                "Volume": [100.0, 120.0, 140.0, 160.0],
+            },
+            index=pd.date_range("2026-06-01", periods=4, freq="D", tz="UTC"),
+        )
+
+        signals = SweepReversalSignalModule(
+            SweepReversalSignalConfig(lookback=3, timeframe="1d")
+        ).generate(features, symbol="AAPL")
+
+        self.assertEqual(signals, [])
+
+    def test_crash_short_signal_module_computes_current_short_signal_from_ohlcv(self):
+        from quant_platform import CrashShortSignalConfig, CrashShortSignalModule
+        from quant_platform.signals import Direction
+
+        features = pd.DataFrame(
+            {
+                "Open": [110.0, 105.0, 100.0, 99.0],
+                "High": [112.0, 106.0, 101.0, 100.0],
+                "Low": [80.0, 104.0, 99.0, 93.0],
+                "Close": [110.0, 105.0, 100.0, 94.0],
+                "Volume": [100.0, 110.0, 120.0, 300.0],
+            },
+            index=pd.date_range("2026-06-01", periods=4, freq="D", tz="UTC"),
+        )
+
+        signals = CrashShortSignalModule(
+            CrashShortSignalConfig(lookback=3, timeframe="1d", min_drop_pct=0.05, volume_multiplier=2.0)
+        ).generate(features, symbol="BTC/USDT")
+
+        self.assertEqual(len(signals), 1)
+        signal = signals[0]
+        self.assertEqual(signal.module, "crash_short")
+        self.assertEqual(signal.symbol, "BTC/USDT")
+        self.assertEqual(signal.direction, Direction.SHORT)
+        self.assertEqual(signal.preferred_stop, 101.0)
+        self.assertEqual(signal.preferred_target, 80.0)
+        self.assertEqual(signal.required_data, ("ohlcv:1d",))
+        self.assertGreater(signal.score, 72.0)
+        self.assertGreater(signal.confidence, 0.72)
+        self.assertNotIn("_crash_short_signal", features.columns)
+
+    def test_crash_short_signal_module_returns_no_signal_without_volume_confirmation(self):
+        from quant_platform.signal_modules import CrashShortSignalConfig, CrashShortSignalModule
+
+        features = pd.DataFrame(
+            {
+                "Open": [110.0, 105.0, 100.0, 99.0],
+                "High": [112.0, 106.0, 101.0, 100.0],
+                "Low": [80.0, 104.0, 99.0, 93.0],
+                "Close": [110.0, 105.0, 100.0, 94.0],
+                "Volume": [100.0, 110.0, 120.0, 150.0],
+            },
+            index=pd.date_range("2026-06-01", periods=4, freq="D", tz="UTC"),
+        )
+
+        signals = CrashShortSignalModule(
+            CrashShortSignalConfig(lookback=3, timeframe="1d", min_drop_pct=0.05, volume_multiplier=2.0)
+        ).generate(features, symbol="BTC/USDT")
+
+        self.assertEqual(signals, [])
+
+    def test_failed_bounce_signal_module_computes_current_short_signal_from_ohlcv(self):
+        from quant_platform import FailedBounceSignalConfig, FailedBounceSignalModule
+        from quant_platform.signals import Direction
+
+        features = pd.DataFrame(
+            {
+                "Open": [109.0, 107.0, 105.0, 106.0, 102.0],
+                "High": [111.0, 109.0, 108.0, 110.5, 102.5],
+                "Low": [108.0, 95.0, 104.0, 102.0, 100.0],
+                "Close": [110.0, 108.0, 106.0, 103.0, 100.5],
+                "Volume": [100.0, 110.0, 120.0, 130.0, 150.0],
+            },
+            index=pd.date_range("2026-06-01", periods=5, freq="D", tz="UTC"),
+        )
+
+        signals = FailedBounceSignalModule(
+            FailedBounceSignalConfig(lookback=3, timeframe="1d")
+        ).generate(features, symbol="BTC/USDT")
+
+        self.assertEqual(len(signals), 1)
+        signal = signals[0]
+        self.assertEqual(signal.module, "failed_bounce")
+        self.assertEqual(signal.symbol, "BTC/USDT")
+        self.assertEqual(signal.direction, Direction.SHORT)
+        self.assertEqual(signal.preferred_stop, 110.5)
+        self.assertEqual(signal.preferred_target, 95.0)
+        self.assertEqual(signal.required_data, ("ohlcv:1d",))
+        self.assertGreater(signal.score, 69.0)
+        self.assertGreater(signal.confidence, 0.69)
+        self.assertNotIn("_failed_bounce_gate", features.columns)
+
+    def test_failed_bounce_signal_module_returns_no_signal_without_breakdown(self):
+        from quant_platform.signal_modules import FailedBounceSignalConfig, FailedBounceSignalModule
+
+        features = pd.DataFrame(
+            {
+                "Open": [109.0, 107.0, 105.0, 106.0, 103.0],
+                "High": [111.0, 109.0, 108.0, 110.5, 104.0],
+                "Low": [108.0, 95.0, 104.0, 102.0, 101.5],
+                "Close": [110.0, 108.0, 106.0, 103.0, 102.5],
+                "Volume": [100.0, 110.0, 120.0, 130.0, 150.0],
+            },
+            index=pd.date_range("2026-06-01", periods=5, freq="D", tz="UTC"),
+        )
+
+        signals = FailedBounceSignalModule(
+            FailedBounceSignalConfig(lookback=3, timeframe="1d")
+        ).generate(features, symbol="BTC/USDT")
+
+        self.assertEqual(signals, [])
+
+    def test_bull_trap_signal_module_computes_current_short_signal_from_ohlcv(self):
+        from quant_platform import BullTrapSignalConfig, BullTrapSignalModule
+        from quant_platform.signals import Direction
+
+        features = pd.DataFrame(
+            {
+                "Open": [109.0, 107.0, 105.0, 106.0, 104.0],
+                "High": [111.0, 109.0, 108.0, 113.0, 106.0],
+                "Low": [108.0, 95.0, 104.0, 100.0, 100.5],
+                "Close": [110.0, 108.0, 106.0, 103.0, 101.5],
+                "Volume": [100.0, 110.0, 120.0, 260.0, 150.0],
+            },
+            index=pd.date_range("2026-06-01", periods=5, freq="D", tz="UTC"),
+        )
+
+        signals = BullTrapSignalModule(
+            BullTrapSignalConfig(lookback=3, timeframe="1d", volume_multiplier=1.5)
+        ).generate(features, symbol="BTC/USDT")
+
+        self.assertEqual(len(signals), 1)
+        signal = signals[0]
+        self.assertEqual(signal.module, "bull_trap")
+        self.assertEqual(signal.symbol, "BTC/USDT")
+        self.assertEqual(signal.direction, Direction.SHORT)
+        self.assertEqual(signal.preferred_stop, 113.0)
+        self.assertEqual(signal.preferred_target, 95.0)
+        self.assertEqual(signal.required_data, ("ohlcv:1d",))
+        self.assertGreater(signal.score, 70.0)
+        self.assertGreater(signal.confidence, 0.70)
+        self.assertNotIn("_bull_trap_signal", features.columns)
+
+    def test_bull_trap_signal_module_returns_no_signal_without_breakout_volume(self):
+        from quant_platform.signal_modules import BullTrapSignalConfig, BullTrapSignalModule
+
+        features = pd.DataFrame(
+            {
+                "Open": [109.0, 107.0, 105.0, 106.0, 104.0],
+                "High": [111.0, 109.0, 108.0, 113.0, 106.0],
+                "Low": [108.0, 95.0, 104.0, 100.0, 100.5],
+                "Close": [110.0, 108.0, 106.0, 103.0, 101.5],
+                "Volume": [100.0, 110.0, 120.0, 130.0, 150.0],
+            },
+            index=pd.date_range("2026-06-01", periods=5, freq="D", tz="UTC"),
+        )
+
+        signals = BullTrapSignalModule(
+            BullTrapSignalConfig(lookback=3, timeframe="1d", volume_multiplier=1.5)
+        ).generate(features, symbol="BTC/USDT")
+
+        self.assertEqual(signals, [])
+
     def test_btc_signal_modules_map_existing_feature_columns(self):
         from quant_btc.signal_modules import build_btc_signal_modules
 
@@ -184,6 +662,290 @@ class SignalModuleTest(unittest.TestCase):
         self.assertEqual(signals[0].preferred_stop, 95.0)
         self.assertEqual(signals[1].preferred_stop, 105.0)
         self.assertEqual(signals[1].preferred_target, 90.0)
+
+    def test_btc_base_entry_signal_selects_standard_signal_with_legacy_gate_rules(self):
+        from quant_btc.signal_modules import select_btc_base_entry_signal
+        from quant_platform.signals import Direction
+
+        row = pd.Series(
+            {
+                "score_pullback_long": 80.0,
+                "score_pullback_short": 82.0,
+                "_btc_long_stop": 95.0,
+                "_btc_short_stop": 106.0,
+                "_btc_long_target": 115.0,
+                "_btc_short_target": 88.0,
+            }
+        )
+
+        signal = select_btc_base_entry_signal(
+            row,
+            symbol="BTC/USDT",
+            module="pullback",
+            long_column="score_pullback_long",
+            short_column="score_pullback_short",
+            regime=1,
+            daily_ema_dir=1,
+            weekly_ema_dir=0,
+            allow_long=True,
+            allow_short=True,
+            score_threshold=75.0,
+            long_stop_column="_btc_long_stop",
+            short_stop_column="_btc_short_stop",
+            long_target_column="_btc_long_target",
+            short_target_column="_btc_short_target",
+        )
+
+        self.assertIsNotNone(signal)
+        self.assertEqual(signal.module, "pullback")
+        self.assertEqual(signal.symbol, "BTC/USDT")
+        self.assertEqual(signal.direction, Direction.LONG)
+        self.assertEqual(signal.score, 80.0)
+        self.assertEqual(signal.preferred_stop, 95.0)
+        self.assertEqual(signal.preferred_target, 115.0)
+        self.assertEqual(signal.confidence, 0.80)
+
+        high_risk_signal = select_btc_base_entry_signal(
+            row,
+            symbol="BTC/USDT",
+            module="pullback",
+            long_column="score_pullback_long",
+            short_column="score_pullback_short",
+            regime=4,
+            daily_ema_dir=1,
+            weekly_ema_dir=0,
+            allow_long=True,
+            allow_short=True,
+            score_threshold=75.0,
+        )
+
+        self.assertIsNone(high_risk_signal)
+
+    def test_btc_tactical_signal_selects_strong_bull_retest_as_standard_signal(self):
+        from quant_btc.signal_modules import select_btc_tactical_signal
+        from quant_platform.signals import Direction
+
+        row = pd.Series(
+            {
+                "Close": 120.0,
+                "_d_ema_169": 100.0,
+                "score_breakout_retest_long": 72.0,
+                "score_pullback_struct_long": 95.0,
+                "score_sweep_reversal_long": 95.0,
+                "score_meanrev_range_long": 95.0,
+                "_sweep_signal_long": True,
+                "rsi_14": 55.0,
+                "_late_chase": False,
+                "_bull_guard": False,
+            }
+        )
+
+        signal = select_btc_tactical_signal(
+            row,
+            symbol="BTC/USDT",
+            regime=1,
+            daily_ema_dir=1,
+            weekly_ema_dir=1,
+            core_active=False,
+            bear_core_active=False,
+            short_rsi_floor=35.0,
+            mtf_higher_low=False,
+        )
+
+        self.assertIsNotNone(signal)
+        self.assertEqual(signal.module, "breakout_retest")
+        self.assertEqual(signal.direction, Direction.LONG)
+        self.assertEqual(signal.score, 72.0)
+        self.assertEqual(signal.required_data, ("ohlcv:4h", "features:btc_compat"))
+
+    def test_btc_tactical_signal_selects_strong_bear_crash_short_as_standard_signal(self):
+        from quant_btc.signal_modules import select_btc_tactical_signal
+        from quant_platform.signals import Direction
+
+        row = pd.Series(
+            {
+                "Close": 80.0,
+                "_d_ema_169": 100.0,
+                "score_crash_short": 78.0,
+                "rsi_14": 42.0,
+                "_late_chase": False,
+                "_bull_guard": False,
+            }
+        )
+
+        signal = select_btc_tactical_signal(
+            row,
+            symbol="BTC/USDT",
+            regime=2,
+            daily_ema_dir=-1,
+            weekly_ema_dir=-1,
+            core_active=False,
+            bear_core_active=False,
+            short_rsi_floor=35.0,
+        )
+
+        self.assertIsNotNone(signal)
+        self.assertEqual(signal.module, "crash")
+        self.assertEqual(signal.direction, Direction.SHORT)
+        self.assertEqual(signal.score, 78.0)
+        self.assertGreater(signal.confidence, 0.77)
+
+    def test_btc_core_entry_signal_selects_standard_core_long_signal(self):
+        from quant_btc.signal_modules import select_btc_core_entry_signal
+        from quant_platform.signals import Direction
+
+        signal = select_btc_core_entry_signal(symbol="BTC/USDT", regime=1)
+
+        self.assertIsNotNone(signal)
+        self.assertEqual(signal.module, "core_long")
+        self.assertEqual(signal.symbol, "BTC/USDT")
+        self.assertEqual(signal.direction, Direction.LONG)
+        self.assertEqual(signal.score, 100.0)
+        self.assertEqual(signal.confidence, 1.0)
+        self.assertEqual(signal.required_data, ("ohlcv:4h", "regime:btc_compat"))
+
+        self.assertIsNone(select_btc_core_entry_signal(symbol="BTC/USDT", regime=0))
+
+    def test_btc_core_add_signal_selects_standard_pullback_add_signal(self):
+        from quant_btc.signal_modules import select_btc_core_add_signal
+        from quant_platform.signals import Direction
+
+        row = pd.Series({"pullback_long": True, "score_pullback_long": 78.0})
+
+        signal = select_btc_core_add_signal(row, symbol="BTC/USDT")
+
+        self.assertIsNotNone(signal)
+        self.assertEqual(signal.module, "core_add")
+        self.assertEqual(signal.direction, Direction.LONG)
+        self.assertEqual(signal.score, 78.0)
+        self.assertEqual(signal.entry_reason, "core_add BTC compatibility entry")
+        self.assertIsNone(select_btc_core_add_signal(pd.Series({"pullback_long": False}), symbol="BTC/USDT"))
+
+    def test_btc_bear_core_probe_signal_selects_standard_probe_signal(self):
+        from quant_btc.signal_modules import select_btc_bear_core_probe_signal
+        from quant_platform.signals import Direction
+
+        row = pd.Series(
+            {
+                "_double_top_signal": True,
+                "_top_exhaustion_score": 71.0,
+                "_bull_guard": False,
+            }
+        )
+
+        signal = select_btc_bear_core_probe_signal(
+            row,
+            symbol="BTC/USDT",
+            core_active=False,
+            bear_core_active=False,
+        )
+
+        self.assertIsNotNone(signal)
+        self.assertEqual(signal.module, "bear_core_probe")
+        self.assertEqual(signal.direction, Direction.SHORT)
+        self.assertEqual(signal.score, 71.0)
+        self.assertEqual(signal.required_data, ("ohlcv:4h", "features:btc_compat"))
+        self.assertIsNone(
+            select_btc_bear_core_probe_signal(
+                row,
+                symbol="BTC/USDT",
+                core_active=True,
+                bear_core_active=False,
+            )
+        )
+        self.assertIsNone(
+            select_btc_bear_core_probe_signal(
+                pd.Series({"_double_top_signal": True, "_top_exhaustion_score": 69.0}),
+                symbol="BTC/USDT",
+                core_active=False,
+                bear_core_active=False,
+            )
+        )
+
+    def test_btc_bear_core_confirm_add_signal_selects_standard_signal(self):
+        from quant_btc.signal_modules import select_btc_bear_core_confirm_add_signal
+        from quant_platform.signals import Direction
+
+        row = pd.Series(
+            {
+                "Close": 90.0,
+                "_d_ema_dir": -1.0,
+                "_w_ema_dir": 0.0,
+                "_w_ema_169": 100.0,
+            }
+        )
+
+        signal = select_btc_bear_core_confirm_add_signal(
+            row,
+            symbol="BTC/USDT",
+            bar_index=20,
+            entry_bar=10,
+            active=True,
+            stage=1,
+            probe_peak_r=1.2,
+        )
+
+        self.assertIsNotNone(signal)
+        self.assertEqual(signal.module, "bear_core_confirm")
+        self.assertEqual(signal.direction, Direction.SHORT)
+        self.assertEqual(signal.score, 80.0)
+        self.assertEqual(signal.required_data, ("ohlcv:4h", "features:btc_compat"))
+
+        blocked = select_btc_bear_core_confirm_add_signal(
+            row,
+            symbol="BTC/USDT",
+            bar_index=10,
+            entry_bar=10,
+            active=True,
+            stage=1,
+            probe_peak_r=1.2,
+        )
+        self.assertIsNone(blocked)
+
+    def test_btc_bear_core_acceleration_add_signal_selects_standard_signal(self):
+        from quant_btc.signal_modules import select_btc_bear_core_acceleration_add_signal
+        from quant_platform.signals import Direction
+
+        row = pd.Series(
+            {
+                "_d_ema_dir": -1.0,
+                "_adx_signal": 23.0,
+                "_plus_di": 12.0,
+                "_minus_di": 18.0,
+            }
+        )
+
+        signal = select_btc_bear_core_acceleration_add_signal(
+            row,
+            symbol="BTC/USDT",
+            bar_index=30,
+            last_trade_bar=20,
+            active=True,
+            stage=2,
+        )
+
+        self.assertIsNotNone(signal)
+        self.assertEqual(signal.module, "bear_core_acceleration")
+        self.assertEqual(signal.direction, Direction.SHORT)
+        self.assertEqual(signal.score, 85.0)
+        self.assertEqual(signal.required_data, ("ohlcv:4h", "features:btc_compat"))
+
+        blocked = select_btc_bear_core_acceleration_add_signal(
+            pd.Series(
+                {
+                    "_d_ema_dir": -1.0,
+                    "_adx_signal": 21.0,
+                    "_plus_di": 12.0,
+                    "_minus_di": 18.0,
+                }
+            ),
+            symbol="BTC/USDT",
+            bar_index=30,
+            last_trade_bar=20,
+            active=True,
+            stage=2,
+        )
+        self.assertIsNone(blocked)
 
     def test_btc_preferred_exit_columns_use_atr_without_mutating_input(self):
         from quant_btc.signal_modules import add_btc_preferred_exit_columns

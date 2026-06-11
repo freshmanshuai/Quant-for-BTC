@@ -112,8 +112,14 @@ def _market_from_record(record: dict) -> MarketSpec:
         funding_rate=_optional_float(record.get("funding_rate")),
         contract_multiplier=float(record.get("contract_multiplier", 1.0)),
         trading_session=str(record.get("trading_session", "24/7")),
+        session_timezone=_optional_str(record.get("session_timezone")),
+        session_open=_optional_str(record.get("session_open")),
+        session_close=_optional_str(record.get("session_close")),
+        trading_days=tuple(str(day) for day in record.get("trading_days", ())),
+        correlation_group=_optional_str(record.get("correlation_group")),
         supports_short=bool(record.get("supports_short", False)),
         supports_leverage=bool(record.get("supports_leverage", False)),
+        max_leverage=_optional_float(record.get("max_leverage")),
     )
 
 
@@ -137,8 +143,15 @@ def _market_to_record(market: MarketSpec) -> dict:
         record["trading_session"] = market.trading_session
     elif market.supports_short or market.supports_leverage:
         record["trading_session"] = market.trading_session
+    _add_optional_str(record, "session_timezone", market.session_timezone)
+    _add_optional_str(record, "session_open", market.session_open)
+    _add_optional_str(record, "session_close", market.session_close)
+    if market.trading_days:
+        record["trading_days"] = list(market.trading_days)
+    _add_optional_str(record, "correlation_group", market.correlation_group)
     record["supports_short"] = market.supports_short
     record["supports_leverage"] = market.supports_leverage
+    _add_optional(record, "max_leverage", market.max_leverage)
     return record
 
 
@@ -149,6 +162,15 @@ def _add_optional(record: dict, key: str, value: float | None) -> None:
 
 def _optional_float(value) -> float | None:
     return None if value is None else float(value)
+
+
+def _optional_str(value) -> str | None:
+    return None if value is None else str(value)
+
+
+def _add_optional_str(record: dict, key: str, value: str | None) -> None:
+    if value is not None:
+        record[key] = value
 
 
 def _base_from_symbol(symbol: str) -> str:

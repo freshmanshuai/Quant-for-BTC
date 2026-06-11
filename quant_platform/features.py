@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -35,11 +35,51 @@ class FeatureEngine:
         return out
 
 
+class FeatureModuleRegistry:
+    """Build feature modules from configuration records."""
+
+    def __init__(self):
+        self._factories: dict[str, Callable[[dict[str, object]], FeatureModule]] = {}
+
+    def register(
+        self,
+        module_type: str,
+        factory: Callable[[dict[str, object]], FeatureModule],
+    ) -> "FeatureModuleRegistry":
+        self._factories[module_type] = factory
+        return self
+
+    def create(self, record: Mapping[str, object]) -> FeatureModule:
+        module_type = record.get("type")
+        if not isinstance(module_type, str) or not module_type:
+            raise ValueError("feature module record requires a non-empty type")
+        if module_type not in self._factories:
+            raise ValueError(f"unknown feature module type: {module_type}")
+        raw_params = record.get("params", {})
+        if raw_params is None:
+            params: dict[str, object] = {}
+        elif isinstance(raw_params, Mapping):
+            params = dict(raw_params)
+        else:
+            raise ValueError("feature module params must be a mapping")
+        return self._factories[module_type](params)
+
+    def build_engine(self, records: Sequence[Mapping[str, object]]) -> FeatureEngine:
+        return FeatureEngine([self.create(record) for record in records])
+
+
 class FeatureStoreWriter(Protocol):
     """Storage boundary for persisted feature sets."""
 
     def write(self, series_id: FeatureSeriesId, features: pd.DataFrame) -> Path:
         """Persist a feature frame and return the storage path."""
+
+
+class FeatureStore(FeatureStoreWriter, Protocol):
+    """Read/write storage boundary for persisted feature sets."""
+
+    def read(self, series_id: FeatureSeriesId) -> pd.DataFrame:
+        """Load a persisted feature frame."""
 
 
 @dataclass(frozen=True)
@@ -56,16 +96,35 @@ def run_feature_engine_with_cache(
     *,
     series_id: FeatureSeriesId,
     store: FeatureStoreWriter | None = None,
+    refresh: bool = False,
 ) -> FeatureRunResult:
-    """Run a feature engine and optionally persist the resulting feature frame."""
-    features = engine.run(bars)
+    """Run a feature engine with optional read-through FeatureStore caching."""
     if store is None:
+        features = engine.run(bars)
         return FeatureRunResult(features=features)
+
+    if not refresh and hasattr(store, "read"):
+        try:
+            cached = store.read(series_id)
+            return FeatureRunResult(
+                features=cached,
+                cache={
+                    "cacheKey": series_id.cache_key,
+                    "hit": True,
+                    "rows": int(len(cached)),
+                    "columns": list(cached.columns),
+                },
+            )
+        except FileNotFoundError:
+            pass
+
+    features = engine.run(bars)
     path = store.write(series_id, features)
     return FeatureRunResult(
         features=features,
         cache={
             "cacheKey": series_id.cache_key,
+            "hit": False,
             "path": str(path),
             "rows": int(len(features)),
             "columns": list(features.columns),
@@ -180,6 +239,7 @@ class VolatilityConfig:
     """ATR, ATR percentile, and ADX settings."""
 
     period: int = 14
+    adx_period: int | None = None
     percentile_lookback: int = 120
     atr_column: str | None = None
     atr_percentile_column: str | None = None
@@ -197,12 +257,13 @@ class VolatilityFeatureModule:
     def apply(self, bars: pd.DataFrame) -> pd.DataFrame:
         out = bars.copy()
         period = self.config.period
+        adx_period = self.config.adx_period or period
         atr_col = self.config.atr_column or f"_atr_{period}"
         atr_pct_col = self.config.atr_percentile_column or f"_atr_pct_{period}"
-        adx_col = self.config.adx_column or f"_adx_{period}"
+        adx_col = self.config.adx_column or f"_adx_{adx_period}"
         out[atr_col] = atr(out["High"], out["Low"], out["Close"], period)
         out[atr_pct_col] = rolling_pct_rank(out[atr_col] / out["Close"], self.config.percentile_lookback)
-        out[adx_col] = adx(out["High"], out["Low"], out["Close"], period)
+        out[adx_col] = adx(out["High"], out["Low"], out["Close"], adx_period)
         return out
 
 
@@ -304,6 +365,60 @@ class DerivativesFeatureModule:
 
 
 @dataclass(frozen=True)
+class OrderBookFeatureConfig:
+    """Order-book feature settings."""
+
+    depth: int = 5
+    prefix: str = "order_book"
+
+
+class OrderBookFeatureModule:
+    """Align order-book snapshots to bars and add spread/depth features."""
+
+    name = "order_book"
+
+    def __init__(self, snapshots: pd.DataFrame | None, config: OrderBookFeatureConfig | None = None):
+        self.snapshots = snapshots
+        self.config = config or OrderBookFeatureConfig()
+
+    def apply(self, bars: pd.DataFrame) -> pd.DataFrame:
+        out = bars.copy()
+        cfg = self.config
+        prefix = cfg.prefix
+        depth = cfg.depth
+
+        best_bid = _aligned_order_book_series(self.snapshots, "bid_price_1", out.index, default=np.nan)
+        best_ask = _aligned_order_book_series(self.snapshots, "ask_price_1", out.index, default=np.nan)
+        out[f"{prefix}_best_bid"] = best_bid
+        out[f"{prefix}_best_ask"] = best_ask
+        out[f"{prefix}_spread"] = best_ask - best_bid
+        out[f"{prefix}_mid"] = (best_bid + best_ask) / 2.0
+        out[f"{prefix}_relative_spread"] = out[f"{prefix}_spread"] / out[f"{prefix}_mid"].clip(lower=1e-10)
+
+        bid_size = pd.Series(0.0, index=out.index, dtype=float)
+        ask_size = pd.Series(0.0, index=out.index, dtype=float)
+        for level in range(1, depth + 1):
+            bid_size += _aligned_order_book_series(
+                self.snapshots,
+                f"bid_size_{level}",
+                out.index,
+                default=0.0,
+            )
+            ask_size += _aligned_order_book_series(
+                self.snapshots,
+                f"ask_size_{level}",
+                out.index,
+                default=0.0,
+            )
+
+        out[f"{prefix}_bid_size_sum_{depth}"] = bid_size
+        out[f"{prefix}_ask_size_sum_{depth}"] = ask_size
+        total_size = (bid_size + ask_size).clip(lower=1e-10)
+        out[f"{prefix}_imbalance_{depth}"] = (bid_size - ask_size) / total_size
+        return out
+
+
+@dataclass(frozen=True)
 class ExternalMetricFeatureConfig:
     """Settings for point-in-time external metrics such as on-chain and sentiment data."""
 
@@ -343,6 +458,30 @@ class ExternalMetricFeatureModule:
         return tuple(str(column) for column in numeric.columns)
 
 
+def default_feature_module_registry() -> FeatureModuleRegistry:
+    """Return registry entries for config-only platform feature modules."""
+    registry = FeatureModuleRegistry()
+    registry.register(
+        "technical_indicators",
+        lambda params: TechnicalIndicatorModule(TechnicalIndicatorConfig(**_tuple_params(params, ("ema_lengths",)))),
+    )
+    registry.register("donchian", lambda params: DonchianFeatureModule(DonchianConfig(**params)))
+    registry.register("volume", lambda params: VolumeFeatureModule(VolumeConfig(**params)))
+    registry.register("volatility", lambda params: VolatilityFeatureModule(VolatilityConfig(**params)))
+    registry.register("bollinger", lambda params: BollingerFeatureModule(BollingerConfig(**params)))
+    registry.register("price_action", lambda params: PriceActionFeatureModule())
+    return registry
+
+
+def _tuple_params(params: dict[str, object], names: Sequence[str]) -> dict[str, object]:
+    converted = dict(params)
+    for name in names:
+        value = converted.get(name)
+        if isinstance(value, list):
+            converted[name] = tuple(value)
+    return converted
+
+
 def _aligned_derivative_series(
     derivatives: pd.DataFrame | None,
     column: str,
@@ -371,6 +510,19 @@ def _aligned_external_metric_series(
     else:
         aligned = series.reindex(index)
     return aligned.fillna(fill_value).astype(float)
+
+
+def _aligned_order_book_series(
+    snapshots: pd.DataFrame | None,
+    column: str,
+    index: pd.Index,
+    *,
+    default: float,
+) -> pd.Series:
+    if snapshots is None or snapshots.empty or column not in snapshots.columns:
+        return pd.Series(default, index=index, dtype=float)
+    series = pd.to_numeric(snapshots[column], errors="coerce")
+    return series.reindex(index, method="ffill").fillna(default).astype(float)
 
 
 def ema(series: pd.Series, length: int) -> pd.Series:

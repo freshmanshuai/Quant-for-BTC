@@ -6,6 +6,7 @@ from typing import Literal
 import pickle
 
 import pandas as pd
+from quant_platform.connectors import fetch_derivatives_with_cache
 from quant_platform.connectors_ccxt import CcxtExchangeConnector, ConnectorError
 from quant_platform.core import AssetSpec, MarketSpec
 from quant_platform.data import BarSeriesId, DerivativeSeriesId
@@ -72,13 +73,6 @@ def _load_derivative_store(series_id: DerivativeSeriesId) -> pd.DataFrame | None
         return ParquetDerivativeStore(_DERIVATIVE_STORE_DIR).read(series_id)
     except (FileNotFoundError, MissingStorageDependency):
         return None
-
-
-def _save_derivative_store(series_id: DerivativeSeriesId, df: pd.DataFrame) -> None:
-    try:
-        ParquetDerivativeStore(_DERIVATIVE_STORE_DIR).write(series_id, df)
-    except MissingStorageDependency:
-        return
 
 
 def _load_cache(cache_path: Path) -> pd.DataFrame | None:
@@ -280,11 +274,17 @@ def fetch_derivative_data(
     )
     connector = CcxtExchangeConnector(timeout_ms=30_000, proxy_url=proxy_url, max_retries=5)
     try:
-        combined = connector.fetch_derivatives(market)
+        combined = fetch_derivatives_with_cache(
+            connector=connector,
+            store=ParquetDerivativeStore(_DERIVATIVE_STORE_DIR),
+            source="ccxt",
+            market=market,
+            open_interest_timeframe="4h",
+            refresh=True,
+        )
     except ConnectorError:
         return None
 
-    _save_derivative_store(series_id, combined)
     _save_cache(cache_path, combined)
     print(f"[fetch] Derivative data saved to {cache_path.name} ({len(combined)} rows)")
     return combined

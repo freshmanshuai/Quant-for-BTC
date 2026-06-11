@@ -13,6 +13,7 @@ import math
 import time
 import pandas as pd
 from flask import Flask, Response, jsonify, request, send_from_directory
+from quant_platform.backtest import BacktestExecutionConfig
 from quant_platform.data import ExternalMetricSeriesId
 from quant_platform.stores import MissingStorageDependency, ParquetExternalMetricStore
 from serve.valuescan_client import ValuescanAPIError, ValuescanClient, ValuescanConfigError
@@ -39,21 +40,61 @@ from serve.data_loader import (
 )
 from serve.signal_preview import (
     get_btc_event_backtest_preview,
+    get_btc_latest_signal_snapshot,
     get_btc_migration_comparison_preview,
     get_btc_pipeline_preview,
     get_btc_signal_preview,
+    get_signal_market_options,
+    get_signal_research_event_backtest_preview,
     get_signal_research_preview,
 )
 
 
-def _load_research_preview_ohlcv(timeframe, market):
-    if market.asset.symbol == "BTC/USDT" and market.exchange == "binance" and market.market_type == "swap":
-        return get_ohlcv(timeframe)
-    return pd.DataFrame()
-
-
 def create_app():
     app = Flask(__name__, static_folder="static", static_url_path="")
+
+    def _bool_arg(name: str, default: bool = False) -> bool:
+        value = request.args.get(name)
+        if value is None:
+            return default
+        return value.lower() in {"1", "true", "yes", "on"}
+
+    def _csv_or_value_arg(name: str, default: str):
+        values = request.args.getlist(name)
+        if not values:
+            return default
+        parts = [
+            item.strip()
+            for value in values
+            for item in str(value).split(",")
+            if item.strip()
+        ]
+        return parts if len(parts) > 1 else (parts[0] if parts else default)
+
+    def _event_execution_config_arg() -> BacktestExecutionConfig | None:
+        config: dict[str, object] = {}
+        for name in (
+            "fee_rate",
+            "slippage_bps",
+            "max_entry_fill_fraction_per_bar",
+            "max_entry_volume_fraction_per_bar",
+            "max_exit_fill_fraction_per_bar",
+            "max_exit_volume_fraction_per_bar",
+        ):
+            if name in request.args:
+                config[name] = float(request.args[name])
+        for name in ("intrabar_stop_target", "intrabar_entry_limit"):
+            if name in request.args:
+                config[name] = _bool_arg(name)
+        for name in ("max_entry_order_age_bars", "max_exit_order_age_bars"):
+            if name in request.args:
+                config[name] = int(request.args[name])
+        for name in ("entry_spread_feature", "exit_spread_feature"):
+            if name in request.args:
+                value = request.args[name].strip()
+                if value:
+                    config[name] = value
+        return BacktestExecutionConfig(**config) if config else None
 
     def _valuescan_error(exc: Exception, status: int):
         if isinstance(exc, ValuescanConfigError):
@@ -261,6 +302,23 @@ def create_app():
                 "message": f"Missing runtime dependency: {exc.name}",
             }), 503
 
+    @app.route("/api/signals/latest")
+    def signals_latest():
+        timeframe = request.args.get("timeframe", "4h")
+        symbol = request.args.get("symbol", "BTC/USDT")
+        equity = max(1.0, float(request.args.get("equity", 10_000)))
+        try:
+            return jsonify(get_btc_latest_signal_snapshot(timeframe=timeframe, symbol=symbol, equity=equity))
+        except ModuleNotFoundError as exc:
+            return jsonify({
+                "error": "signal_latest_unavailable",
+                "message": f"Missing runtime dependency: {exc.name}",
+            }), 503
+
+    @app.route("/api/signals/markets")
+    def signals_markets():
+        return jsonify(get_signal_market_options())
+
     # ── Static files ──
 
     @app.route("/api/signals/research-preview")
@@ -270,6 +328,8 @@ def create_app():
         exchange = request.args.get("exchange", "binance")
         market_type = request.args.get("market_type", "swap")
         equity = max(1.0, float(request.args.get("equity", 10_000)))
+        refresh_bars = _bool_arg("refresh_bars")
+        refresh_features = _bool_arg("refresh_features")
         try:
             return jsonify(get_signal_research_preview(
                 timeframe=timeframe,
@@ -277,7 +337,8 @@ def create_app():
                 exchange=exchange,
                 market_type=market_type,
                 equity=equity,
-                load_ohlcv=_load_research_preview_ohlcv,
+                refresh_bars=refresh_bars,
+                refresh_features=refresh_features,
             ))
         except ModuleNotFoundError as exc:
             return jsonify({
@@ -290,11 +351,44 @@ def create_app():
         timeframe = request.args.get("timeframe", "4h")
         symbol = request.args.get("symbol", "BTC/USDT")
         equity = max(1.0, float(request.args.get("equity", 10_000)))
+        execution = _event_execution_config_arg()
         try:
-            return jsonify(get_btc_event_backtest_preview(timeframe=timeframe, symbol=symbol, equity=equity))
+            kwargs = {"timeframe": timeframe, "symbol": symbol, "equity": equity}
+            if execution is not None:
+                kwargs["execution"] = execution
+            return jsonify(get_btc_event_backtest_preview(**kwargs))
         except ModuleNotFoundError as exc:
             return jsonify({
                 "error": "signal_event_backtest_preview_unavailable",
+                "message": f"Missing runtime dependency: {exc.name}",
+            }), 503
+
+    @app.route("/api/signals/research-event-backtest-preview")
+    def signals_research_event_backtest_preview():
+        timeframe = request.args.get("timeframe", "4h")
+        symbol = _csv_or_value_arg("symbol", "BTC/USDT")
+        exchange = _csv_or_value_arg("exchange", "binance")
+        market_type = _csv_or_value_arg("market_type", "swap")
+        equity = max(1.0, float(request.args.get("equity", 10_000)))
+        refresh_bars = _bool_arg("refresh_bars")
+        refresh_features = _bool_arg("refresh_features")
+        execution = _event_execution_config_arg()
+        try:
+            kwargs = {
+                "timeframe": timeframe,
+                "symbol": symbol,
+                "exchange": exchange,
+                "market_type": market_type,
+                "equity": equity,
+                "refresh_bars": refresh_bars,
+                "refresh_features": refresh_features,
+            }
+            if execution is not None:
+                kwargs["execution"] = execution
+            return jsonify(get_signal_research_event_backtest_preview(**kwargs))
+        except ModuleNotFoundError as exc:
+            return jsonify({
+                "error": "signal_research_event_backtest_preview_unavailable",
                 "message": f"Missing runtime dependency: {exc.name}",
             }), 503
 

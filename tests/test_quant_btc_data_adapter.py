@@ -97,6 +97,39 @@ class QuantBtcDataAdapterTest(unittest.TestCase):
         self.assertEqual(captured["market"].market_key, "binance:swap:BTC/USDT")
         save_cache.assert_called_once()
 
+    def test_fetch_derivative_data_remote_path_uses_platform_derivative_cache_boundary(self):
+        from quant_btc import data
+
+        expected = pd.DataFrame(
+            {"funding_rate": [0.0001], "open_interest": [1000.0]},
+            index=pd.to_datetime([1700000000000], unit="ms", utc=True),
+        )
+        captured = {}
+
+        class FakeConnector:
+            def __init__(self, timeout_ms, proxy_url, max_retries):
+                captured["init"] = (timeout_ms, proxy_url, max_retries)
+
+        def fake_fetch_with_cache(**kwargs):
+            captured.update(kwargs)
+            return expected
+
+        with patch("quant_btc.data._load_cache", return_value=None), \
+             patch("quant_btc.data._load_derivative_store", return_value=None), \
+             patch("quant_btc.data._save_cache") as save_cache, \
+             patch("quant_btc.data.CcxtExchangeConnector", FakeConnector), \
+             patch("quant_btc.data.fetch_derivatives_with_cache", side_effect=fake_fetch_with_cache):
+            result = data.fetch_derivative_data("BTC/USDT", exchange_id="binance", proxy_url="http://proxy")
+
+        self.assertIs(result, expected)
+        self.assertIsInstance(captured["connector"], FakeConnector)
+        self.assertEqual(captured["source"], "ccxt")
+        self.assertEqual(captured["market"].market_key, "binance:swap:BTC/USDT")
+        self.assertEqual(captured["open_interest_timeframe"], "4h")
+        self.assertTrue(captured["refresh"])
+        self.assertEqual(captured["init"], (30000, "http://proxy", 5))
+        save_cache.assert_called_once()
+
     def test_fetch_derivative_data_uses_parquet_store_before_pickle_cache(self):
         from quant_btc import data
 

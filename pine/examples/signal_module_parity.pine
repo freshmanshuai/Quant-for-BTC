@@ -1,0 +1,218 @@
+//@version=6
+indicator("Generated Signal Module Parity Example", overlay=true)
+
+// Generated from quant_platform signal-module config. Do not edit signal constants by hand.
+pineObservationHeader = "signal_key,bar_time,entry_price,stop_price,target_price,score"
+
+// breakout
+breakout_lookback = input.int(3, "breakout lookback", minval=1)
+breakout_riskReward = input.float(2.0, "breakout risk reward", minval=0.0)
+breakout_scoreFloor = input.float(70.0, "breakout score floor")
+breakout_scoreBreakoutScale = input.float(1000.0, "breakout score breakout scale")
+breakout_high = request.security(syminfo.tickerid, "1D", high)
+breakout_low = request.security(syminfo.tickerid, "1D", low)
+breakout_close = request.security(syminfo.tickerid, "1D", close)
+breakout_channelHigh = ta.highest(breakout_high[1], breakout_lookback)
+breakout_channelLow = ta.lowest(breakout_low[1], breakout_lookback)
+breakout_longBreakoutPct = math.max(0.0, (breakout_close - breakout_channelHigh) / breakout_channelHigh)
+breakout_shortBreakoutPct = math.max(0.0, (breakout_channelLow - breakout_close) / breakout_channelLow)
+breakout_longScore = breakout_scoreFloor + breakout_longBreakoutPct * breakout_scoreBreakoutScale
+breakout_shortScore = breakout_scoreFloor + breakout_shortBreakoutPct * breakout_scoreBreakoutScale
+breakout_longStop = breakout_channelLow
+breakout_shortStop = breakout_channelHigh
+breakout_longTarget = breakout_close + breakout_riskReward * math.abs(breakout_close - breakout_longStop)
+breakout_shortTarget = breakout_close - breakout_riskReward * math.abs(breakout_close - breakout_shortStop)
+breakout_longSignal = breakout_close > breakout_channelHigh
+breakout_shortSignal = breakout_close < breakout_channelLow
+breakout_longSignalKey = str.format("{0}|tactical|breakout|long", syminfo.ticker)
+breakout_shortSignalKey = str.format("{0}|tactical|breakout|short", syminfo.ticker)
+plotshape(breakout_longSignal, title="breakout Long", style=shape.triangleup, location=location.belowbar, color=color.lime, text="L")
+plotshape(breakout_shortSignal, title="breakout Short", style=shape.triangledown, location=location.abovebar, color=color.red, text="S")
+if breakout_longSignal
+    alert(str.format("{0},{1},{2},{3},{4},{5}", breakout_longSignalKey, str.tostring(time), str.tostring(breakout_close), str.tostring(breakout_longStop), str.tostring(breakout_longTarget), str.tostring(breakout_longScore)), alert.freq_once_per_bar_close)
+if breakout_shortSignal
+    alert(str.format("{0},{1},{2},{3},{4},{5}", breakout_shortSignalKey, str.tostring(time), str.tostring(breakout_close), str.tostring(breakout_shortStop), str.tostring(breakout_shortTarget), str.tostring(breakout_shortScore)), alert.freq_once_per_bar_close)
+
+// pullback
+pullback_emaLength = input.int(3, "pullback EMA length", minval=1)
+pullback_pullbackTolerancePct = input.float(0.01, "pullback pullback tolerance pct", minval=0.0)
+pullback_stopLookback = input.int(2, "pullback stop lookback", minval=1)
+pullback_riskReward = input.float(2.0, "pullback risk reward", minval=0.0)
+pullback_scoreFloor = input.float(68.0, "pullback score floor")
+pullback_scoreResumeScale = input.float(200.0, "pullback score resume scale")
+pullback_high = request.security(syminfo.tickerid, "1D", high)
+pullback_low = request.security(syminfo.tickerid, "1D", low)
+pullback_close = request.security(syminfo.tickerid, "1D", close)
+pullback_ema = ta.ema(pullback_close, pullback_emaLength)
+pullback_previousClose = pullback_close[1]
+pullback_previousHigh = pullback_high[1]
+pullback_previousLow = pullback_low[1]
+pullback_previousEma = pullback_ema[1]
+pullback_resumePct = pullback_previousClose == 0.0 ? 0.0 : math.abs(pullback_close / pullback_previousClose - 1.0)
+pullback_score = pullback_scoreFloor + pullback_resumePct * pullback_scoreResumeScale
+pullback_longStop = ta.lowest(pullback_low, pullback_stopLookback + 1)
+pullback_shortStop = ta.highest(pullback_high, pullback_stopLookback + 1)
+pullback_longTarget = pullback_close + pullback_riskReward * math.abs(pullback_close - pullback_longStop)
+pullback_shortTarget = pullback_close - pullback_riskReward * math.abs(pullback_close - pullback_shortStop)
+pullback_longSignal = pullback_previousLow <= pullback_previousEma * (1.0 + pullback_pullbackTolerancePct) and pullback_previousClose <= pullback_previousEma * (1.0 + pullback_pullbackTolerancePct) and pullback_close > math.max(pullback_previousClose, pullback_ema)
+pullback_shortSignal = pullback_previousHigh >= pullback_previousEma * (1.0 - pullback_pullbackTolerancePct) and pullback_previousClose >= pullback_previousEma * (1.0 - pullback_pullbackTolerancePct) and pullback_close < math.min(pullback_previousClose, pullback_ema)
+pullback_longSignalKey = str.format("{0}|tactical|pullback|long", syminfo.ticker)
+pullback_shortSignalKey = str.format("{0}|tactical|pullback|short", syminfo.ticker)
+plotshape(pullback_longSignal, title="pullback Long", style=shape.triangleup, location=location.belowbar, color=color.lime, text="L")
+plotshape(pullback_shortSignal, title="pullback Short", style=shape.triangledown, location=location.abovebar, color=color.red, text="S")
+if pullback_longSignal
+    alert(str.format("{0},{1},{2},{3},{4},{5}", pullback_longSignalKey, str.tostring(time), str.tostring(pullback_close), str.tostring(pullback_longStop), str.tostring(pullback_longTarget), str.tostring(pullback_score)), alert.freq_once_per_bar_close)
+if pullback_shortSignal
+    alert(str.format("{0},{1},{2},{3},{4},{5}", pullback_shortSignalKey, str.tostring(time), str.tostring(pullback_close), str.tostring(pullback_shortStop), str.tostring(pullback_shortTarget), str.tostring(pullback_score)), alert.freq_once_per_bar_close)
+
+// meanrev
+meanrev_lookback = input.int(3, "meanrev lookback", minval=1)
+meanrev_stdMult = input.float(1.0, "meanrev std mult", minval=0.0)
+meanrev_stopLookback = input.int(2, "meanrev stop lookback", minval=1)
+meanrev_scoreFloor = input.float(65.0, "meanrev score floor")
+meanrev_scoreDeviationScale = input.float(300.0, "meanrev score deviation scale")
+meanrev_high = request.security(syminfo.tickerid, "1D", high)
+meanrev_low = request.security(syminfo.tickerid, "1D", low)
+meanrev_close = request.security(syminfo.tickerid, "1D", close)
+meanrev_mid = ta.sma(meanrev_close[1], meanrev_lookback)
+meanrev_std = ta.stdev(meanrev_close[1], meanrev_lookback, false)
+meanrev_lower = meanrev_mid - meanrev_stdMult * meanrev_std
+meanrev_upper = meanrev_mid + meanrev_stdMult * meanrev_std
+meanrev_longStop = ta.lowest(meanrev_low, meanrev_stopLookback + 1)
+meanrev_shortStop = ta.highest(meanrev_high, meanrev_stopLookback + 1)
+meanrev_longDeviationPct = meanrev_lower == 0.0 ? 0.0 : math.abs(meanrev_low / meanrev_lower - 1.0)
+meanrev_shortDeviationPct = meanrev_upper == 0.0 ? 0.0 : math.abs(meanrev_high / meanrev_upper - 1.0)
+meanrev_longScore = math.max(0.0, math.min(100.0, meanrev_scoreFloor + meanrev_longDeviationPct * meanrev_scoreDeviationScale))
+meanrev_shortScore = math.max(0.0, math.min(100.0, meanrev_scoreFloor + meanrev_shortDeviationPct * meanrev_scoreDeviationScale))
+meanrev_longTarget = meanrev_mid
+meanrev_shortTarget = meanrev_mid
+meanrev_longSignal = meanrev_low < meanrev_lower and meanrev_lower < meanrev_close and meanrev_close < meanrev_mid and meanrev_longStop < meanrev_close
+meanrev_shortSignal = meanrev_high > meanrev_upper and meanrev_upper > meanrev_close and meanrev_close > meanrev_mid and meanrev_shortStop > meanrev_close
+meanrev_longSignalKey = str.format("{0}|tactical|meanrev|long", syminfo.ticker)
+meanrev_shortSignalKey = str.format("{0}|tactical|meanrev|short", syminfo.ticker)
+plotshape(meanrev_longSignal, title="meanrev Long", style=shape.triangleup, location=location.belowbar, color=color.lime, text="L")
+plotshape(meanrev_shortSignal, title="meanrev Short", style=shape.triangledown, location=location.abovebar, color=color.red, text="S")
+if meanrev_longSignal
+    alert(str.format("{0},{1},{2},{3},{4},{5}", meanrev_longSignalKey, str.tostring(time), str.tostring(meanrev_close), str.tostring(meanrev_longStop), str.tostring(meanrev_longTarget), str.tostring(meanrev_longScore)), alert.freq_once_per_bar_close)
+if meanrev_shortSignal
+    alert(str.format("{0},{1},{2},{3},{4},{5}", meanrev_shortSignalKey, str.tostring(time), str.tostring(meanrev_close), str.tostring(meanrev_shortStop), str.tostring(meanrev_shortTarget), str.tostring(meanrev_shortScore)), alert.freq_once_per_bar_close)
+
+// sweep_reversal
+sweep_reversal_lookback = input.int(3, "sweep_reversal lookback", minval=1)
+sweep_reversal_scoreFloor = input.float(66.0, "sweep_reversal score floor")
+sweep_reversal_scoreSweepScale = input.float(1000.0, "sweep_reversal score sweep scale")
+sweep_reversal_high = request.security(syminfo.tickerid, "1D", high)
+sweep_reversal_low = request.security(syminfo.tickerid, "1D", low)
+sweep_reversal_close = request.security(syminfo.tickerid, "1D", close)
+sweep_reversal_support = ta.lowest(sweep_reversal_low[1], sweep_reversal_lookback)
+sweep_reversal_resistance = ta.highest(sweep_reversal_high[1], sweep_reversal_lookback)
+sweep_reversal_longSweepPct = sweep_reversal_support == 0.0 ? 0.0 : math.abs(sweep_reversal_low / sweep_reversal_support - 1.0)
+sweep_reversal_shortSweepPct = sweep_reversal_resistance == 0.0 ? 0.0 : math.abs(sweep_reversal_high / sweep_reversal_resistance - 1.0)
+sweep_reversal_longScore = math.max(0.0, math.min(100.0, sweep_reversal_scoreFloor + sweep_reversal_longSweepPct * sweep_reversal_scoreSweepScale))
+sweep_reversal_shortScore = math.max(0.0, math.min(100.0, sweep_reversal_scoreFloor + sweep_reversal_shortSweepPct * sweep_reversal_scoreSweepScale))
+sweep_reversal_longStop = sweep_reversal_low
+sweep_reversal_shortStop = sweep_reversal_high
+sweep_reversal_longTarget = sweep_reversal_resistance
+sweep_reversal_shortTarget = sweep_reversal_support
+sweep_reversal_longSignal = sweep_reversal_low < sweep_reversal_support and sweep_reversal_support < sweep_reversal_close and sweep_reversal_close < sweep_reversal_resistance
+sweep_reversal_shortSignal = sweep_reversal_high > sweep_reversal_resistance and sweep_reversal_resistance > sweep_reversal_close and sweep_reversal_close > sweep_reversal_support
+sweep_reversal_longSignalKey = str.format("{0}|tactical|sweep_reversal|long", syminfo.ticker)
+sweep_reversal_shortSignalKey = str.format("{0}|tactical|sweep_reversal|short", syminfo.ticker)
+plotshape(sweep_reversal_longSignal, title="sweep_reversal Long", style=shape.triangleup, location=location.belowbar, color=color.lime, text="L")
+plotshape(sweep_reversal_shortSignal, title="sweep_reversal Short", style=shape.triangledown, location=location.abovebar, color=color.red, text="S")
+if sweep_reversal_longSignal
+    alert(str.format("{0},{1},{2},{3},{4},{5}", sweep_reversal_longSignalKey, str.tostring(time), str.tostring(sweep_reversal_close), str.tostring(sweep_reversal_longStop), str.tostring(sweep_reversal_longTarget), str.tostring(sweep_reversal_longScore)), alert.freq_once_per_bar_close)
+if sweep_reversal_shortSignal
+    alert(str.format("{0},{1},{2},{3},{4},{5}", sweep_reversal_shortSignalKey, str.tostring(time), str.tostring(sweep_reversal_close), str.tostring(sweep_reversal_shortStop), str.tostring(sweep_reversal_shortTarget), str.tostring(sweep_reversal_shortScore)), alert.freq_once_per_bar_close)
+
+// crash_short
+crash_short_lookback = input.int(3, "crash_short lookback", minval=1)
+crash_short_minDropPct = input.float(0.05, "crash_short min drop pct", minval=0.0)
+crash_short_volumeMultiplier = input.float(2.0, "crash_short volume multiplier", minval=0.0)
+crash_short_stopLookback = input.int(1, "crash_short stop lookback", minval=1)
+crash_short_riskReward = input.float(2.0, "crash_short risk reward", minval=0.0)
+crash_short_scoreFloor = input.float(72.0, "crash_short score floor")
+crash_short_scoreDropScale = input.float(300.0, "crash_short score drop scale")
+crash_short_scoreVolumeScale = input.float(10.0, "crash_short score volume scale")
+crash_short_high = request.security(syminfo.tickerid, "1D", high)
+crash_short_low = request.security(syminfo.tickerid, "1D", low)
+crash_short_close = request.security(syminfo.tickerid, "1D", close)
+crash_short_open = request.security(syminfo.tickerid, "1D", open)
+crash_short_volume = request.security(syminfo.tickerid, "1D", volume)
+crash_short_previousClose = crash_short_close[1]
+crash_short_avgVolume = ta.sma(crash_short_volume[1], crash_short_lookback)
+crash_short_dropPct = crash_short_previousClose <= 0.0 ? 0.0 : math.max(0.0, (crash_short_previousClose - crash_short_close) / crash_short_previousClose)
+crash_short_volumeRatio = crash_short_avgVolume <= 0.0 ? 0.0 : crash_short_volume / crash_short_avgVolume
+crash_short_stop = ta.highest(crash_short_high, crash_short_stopLookback + 1)
+crash_short_target = crash_short_close - crash_short_riskReward * math.abs(crash_short_stop - crash_short_close)
+crash_short_excessDrop = math.max(0.0, crash_short_dropPct - crash_short_minDropPct)
+crash_short_excessVolume = math.max(0.0, crash_short_volumeRatio - crash_short_volumeMultiplier)
+crash_short_score = math.max(0.0, math.min(100.0, crash_short_scoreFloor + crash_short_excessDrop * crash_short_scoreDropScale + crash_short_excessVolume * crash_short_scoreVolumeScale))
+crash_short_shortSignal = crash_short_dropPct >= crash_short_minDropPct and crash_short_volumeRatio >= crash_short_volumeMultiplier and crash_short_close < crash_short_open and crash_short_close < crash_short_previousClose and crash_short_stop > crash_short_close
+crash_short_shortSignalKey = str.format("{0}|tactical|crash_short|short", syminfo.ticker)
+plotshape(crash_short_shortSignal, title="crash_short Short", style=shape.triangledown, location=location.abovebar, color=color.red, text="S")
+if crash_short_shortSignal
+    alert(str.format("{0},{1},{2},{3},{4},{5}", crash_short_shortSignalKey, str.tostring(time), str.tostring(crash_short_close), str.tostring(crash_short_stop), str.tostring(crash_short_target), str.tostring(crash_short_score)), alert.freq_once_per_bar_close)
+
+// failed_bounce
+failed_bounce_lookback = input.int(3, "failed_bounce lookback", minval=1)
+failed_bounce_resistanceTolerancePct = input.float(0.01, "failed_bounce resistance tolerance pct", minval=0.0)
+failed_bounce_minUpperWickPct = input.float(0.3, "failed_bounce min upper wick pct", minval=0.0)
+failed_bounce_scoreFloor = input.float(69.0, "failed_bounce score floor")
+failed_bounce_scoreRejectionScale = input.float(300.0, "failed_bounce score rejection scale")
+failed_bounce_scoreWickScale = input.float(10.0, "failed_bounce score wick scale")
+failed_bounce_high = request.security(syminfo.tickerid, "1D", high)
+failed_bounce_low = request.security(syminfo.tickerid, "1D", low)
+failed_bounce_close = request.security(syminfo.tickerid, "1D", close)
+failed_bounce_open = request.security(syminfo.tickerid, "1D", open)
+failed_bounce_resistance = ta.highest(failed_bounce_high[2], failed_bounce_lookback)
+failed_bounce_support = ta.lowest(failed_bounce_low[2], failed_bounce_lookback)
+failed_bounce_setupHigh = failed_bounce_high[1]
+failed_bounce_setupLow = failed_bounce_low[1]
+failed_bounce_setupClose = failed_bounce_close[1]
+failed_bounce_setupOpen = failed_bounce_open[1]
+failed_bounce_setupRange = failed_bounce_setupHigh - failed_bounce_setupLow
+failed_bounce_setupBodyTop = math.max(failed_bounce_setupOpen, failed_bounce_setupClose)
+failed_bounce_upperWick = failed_bounce_setupRange <= 0.0 ? 0.0 : math.max(0.0, (failed_bounce_setupHigh - failed_bounce_setupBodyTop) / failed_bounce_setupRange)
+failed_bounce_stop = math.max(failed_bounce_setupHigh, failed_bounce_high)
+failed_bounce_target = failed_bounce_support
+failed_bounce_rejectionPct = failed_bounce_close <= 0.0 ? 0.0 : math.max(0.0, failed_bounce_resistance / failed_bounce_close - 1.0)
+failed_bounce_score = math.max(0.0, math.min(100.0, failed_bounce_scoreFloor + failed_bounce_rejectionPct * failed_bounce_scoreRejectionScale + failed_bounce_upperWick * failed_bounce_scoreWickScale))
+failed_bounce_shortSignal = failed_bounce_resistance > 0.0 and failed_bounce_support < failed_bounce_close and failed_bounce_setupHigh >= failed_bounce_resistance * (1.0 - failed_bounce_resistanceTolerancePct) and failed_bounce_setupClose < failed_bounce_resistance and failed_bounce_close < failed_bounce_setupLow and failed_bounce_close < failed_bounce_open and failed_bounce_upperWick >= failed_bounce_minUpperWickPct and failed_bounce_stop > failed_bounce_close
+failed_bounce_shortSignalKey = str.format("{0}|tactical|failed_bounce|short", syminfo.ticker)
+plotshape(failed_bounce_shortSignal, title="failed_bounce Short", style=shape.triangledown, location=location.abovebar, color=color.red, text="S")
+if failed_bounce_shortSignal
+    alert(str.format("{0},{1},{2},{3},{4},{5}", failed_bounce_shortSignalKey, str.tostring(time), str.tostring(failed_bounce_close), str.tostring(failed_bounce_stop), str.tostring(failed_bounce_target), str.tostring(failed_bounce_score)), alert.freq_once_per_bar_close)
+
+// bull_trap
+bull_trap_lookback = input.int(3, "bull_trap lookback", minval=1)
+bull_trap_volumeMultiplier = input.float(1.5, "bull_trap volume multiplier", minval=0.0)
+bull_trap_weakCloseThreshold = input.float(0.5, "bull_trap weak close threshold", minval=0.0)
+bull_trap_scoreFloor = input.float(70.0, "bull_trap score floor")
+bull_trap_scoreBreakoutScale = input.float(300.0, "bull_trap score breakout scale")
+bull_trap_scoreRejectionScale = input.float(300.0, "bull_trap score rejection scale")
+bull_trap_scoreVolumeScale = input.float(10.0, "bull_trap score volume scale")
+bull_trap_high = request.security(syminfo.tickerid, "1D", high)
+bull_trap_low = request.security(syminfo.tickerid, "1D", low)
+bull_trap_close = request.security(syminfo.tickerid, "1D", close)
+bull_trap_open = request.security(syminfo.tickerid, "1D", open)
+bull_trap_volume = request.security(syminfo.tickerid, "1D", volume)
+bull_trap_resistance = ta.highest(bull_trap_high[2], bull_trap_lookback)
+bull_trap_support = ta.lowest(bull_trap_low[2], bull_trap_lookback)
+bull_trap_setupHigh = bull_trap_high[1]
+bull_trap_setupVolume = bull_trap_volume[1]
+bull_trap_avgVolume = ta.sma(bull_trap_volume[2], bull_trap_lookback)
+bull_trap_currentRange = bull_trap_high - bull_trap_low
+bull_trap_closePosition = bull_trap_currentRange <= 0.0 ? 0.5 : (bull_trap_close - bull_trap_low) / bull_trap_currentRange
+bull_trap_breakoutPct = bull_trap_resistance <= 0.0 ? 0.0 : math.max(0.0, bull_trap_setupHigh / bull_trap_resistance - 1.0)
+bull_trap_volumeRatio = bull_trap_avgVolume <= 0.0 ? 0.0 : bull_trap_setupVolume / bull_trap_avgVolume
+bull_trap_rejectionPct = bull_trap_close <= 0.0 ? 0.0 : math.max(0.0, bull_trap_resistance / bull_trap_close - 1.0)
+bull_trap_excessVolume = math.max(0.0, bull_trap_volumeRatio - bull_trap_volumeMultiplier)
+bull_trap_stop = math.max(bull_trap_setupHigh, bull_trap_high)
+bull_trap_target = bull_trap_support
+bull_trap_score = math.max(0.0, math.min(100.0, bull_trap_scoreFloor + bull_trap_breakoutPct * bull_trap_scoreBreakoutScale + bull_trap_rejectionPct * bull_trap_scoreRejectionScale + bull_trap_excessVolume * bull_trap_scoreVolumeScale))
+bull_trap_shortSignal = bull_trap_resistance > 0.0 and bull_trap_avgVolume > 0.0 and bull_trap_support < bull_trap_close and bull_trap_setupHigh > bull_trap_resistance and bull_trap_close < bull_trap_resistance and bull_trap_close < bull_trap_open and bull_trap_closePosition < bull_trap_weakCloseThreshold and bull_trap_volumeRatio >= bull_trap_volumeMultiplier and bull_trap_stop > bull_trap_close
+bull_trap_shortSignalKey = str.format("{0}|tactical|bull_trap|short", syminfo.ticker)
+plotshape(bull_trap_shortSignal, title="bull_trap Short", style=shape.triangledown, location=location.abovebar, color=color.red, text="S")
+if bull_trap_shortSignal
+    alert(str.format("{0},{1},{2},{3},{4},{5}", bull_trap_shortSignalKey, str.tostring(time), str.tostring(bull_trap_close), str.tostring(bull_trap_stop), str.tostring(bull_trap_target), str.tostring(bull_trap_score)), alert.freq_once_per_bar_close)

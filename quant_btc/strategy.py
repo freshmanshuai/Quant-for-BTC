@@ -25,7 +25,6 @@ from quant_btc.portfolio_model import (
     btc_bear_core_confirm_add_plan,
     btc_bear_core_giveback_exit_plan,
     btc_bear_core_probe_entry_state_plan,
-    btc_bear_core_probe_signal,
     btc_bear_core_probe_plan,
     btc_bear_core_exit_signal,
     btc_bear_core_stop,
@@ -36,7 +35,6 @@ from quant_btc.portfolio_model import (
     btc_bear_core_waterfall_runner_exit,
     btc_bear_core_waterfall_runner_exit_plan,
     btc_bear_probe_peak_r,
-    btc_base_entry_direction,
     btc_base_entry_plan,
     btc_base_invalidation,
     btc_base_partial_tp,
@@ -47,9 +45,7 @@ from quant_btc.portfolio_model import (
     btc_breakout_stop_target,
     btc_core_add_plan,
     btc_core_add_state_plan,
-    btc_core_add_signal,
     btc_core_entry_plan,
-    btc_core_entry_signal,
     btc_core_exit_plan,
     btc_core_exit_signal,
     btc_core_trail_stop_hit,
@@ -73,6 +69,9 @@ from quant_btc.portfolio_model import (
 from quant_btc.regime_model import btc_regime_entry_gate, build_btc_regime_model
 from quant_btc.risk_model import (
     btc_dual_layer_regime_size_multiplier,
+    build_btc_legacy_entry_risk_audit,
+    build_btc_legacy_entry_risk_decision,
+    build_btc_legacy_entry_risk_engine_decision,
     calculate_btc_base_position_size,
     calculate_btc_tactical_position_size,
 )
@@ -83,12 +82,58 @@ from quant_btc.signal_modules import (
     btc_mtf_higher_low_formed,
     btc_mtf_no_new_extreme,
     btc_mtf_sweep_reclaim,
+    select_btc_base_entry_signal,
+    select_btc_bear_core_acceleration_add_signal,
+    select_btc_bear_core_confirm_add_signal,
+    select_btc_bear_core_probe_signal,
+    select_btc_core_add_signal,
+    select_btc_core_entry_signal,
+    select_btc_flash_crash_dip_buy_signal,
+    select_btc_tactical_signal,
+    select_btc_weighted_legacy_signal,
 )
 from quant_platform.features import (
     DerivativesFeatureConfig,
     DerivativesFeatureModule,
     ema as platform_ema,
 )
+from quant_platform.pipeline import PipelineResult, SignalPipeline
+from quant_platform.portfolio import (
+    PortfolioEngine,
+    PortfolioPlan,
+    PortfolioState,
+    Position,
+    PositionKey,
+)
+from quant_platform.risk import AccountState, RiskEngine, RiskLimits
+from quant_platform.signal_modules import SignalModuleRunner
+from quant_platform.signals import Direction, Signal
+
+
+_BTC_PLATFORM_LAYER_BY_MODULE = {
+    "legacy_zone": "tactical",
+    "legacy_weighted": "tactical",
+    "breakout": "tactical",
+    "breakout_retest": "tactical",
+    "pullback": "tactical",
+    "pullback_struct": "tactical",
+    "meanrev": "tactical",
+    "meanrev_range": "tactical",
+    "sweep_reversal": "tactical",
+    "crash": "tactical",
+    "crash_short": "tactical",
+    "failed_bounce": "tactical",
+    "bull_trap": "tactical",
+    "dip_buy": "tactical",
+    "core_long": "core",
+    "core_add": "core",
+    "core_pullback_add": "core",
+    "bear_core_probe": "bear_core",
+    "bear_core_confirm": "bear_core",
+    "bear_core_confirm_add": "bear_core",
+    "bear_core_acceleration": "bear_core",
+    "bear_core_acceleration_add": "bear_core",
+}
 
 
 # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?Signal feature engineering 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
@@ -326,6 +371,7 @@ class BaseRiskStrategy(Strategy):
     risk_cfg: RiskConfig = RiskConfig()
     cooldown_bars: int = 12
     trade_size_fraction: float = 0.95
+    _ENFORCE_PLATFORM_RISK_ENGINE: bool = False
 
     # Subclass overridable behaviour
     _USE_FIXED_TP: bool = True   # False 鈫?breakout mode: no fixed TP, trail-only exit
@@ -333,6 +379,7 @@ class BaseRiskStrategy(Strategy):
     _MIN_RR: float = 2.0  # minimum reward/risk ratio
     _SCORE_THRESHOLD: int = 70  # minimum score (0-100) for entry
     _RISK_PER_TRADE: float = 0.02  # overridden per module
+    _SIGNAL_MODULE: str = "legacy_zone"
 
     # Partial TP / time stop (overridden by subclasses)
     _USE_PARTIAL_TP: bool = False
@@ -393,6 +440,13 @@ class BaseRiskStrategy(Strategy):
         self._trailing_sl: float = 0.0
         self._extreme_since_entry: float = 0.0
         self._entry_bar: int = 0
+        self._last_platform_risk_decision = None
+        self._last_platform_risk_engine_decision = None
+        self._last_platform_pipeline_result = None
+        self._last_platform_entry_order = None
+        self._platform_pipeline_results = []
+        self._last_platform_risk_audit = None
+        self._platform_risk_audits = []
 
     # -- helpers --
 
@@ -412,6 +466,156 @@ class BaseRiskStrategy(Strategy):
 
     def _is_paused(self) -> bool:
         return self._pause_until_bar >= 0 and self._bar_index() < self._pause_until_bar
+
+    def _record_legacy_entry_risk_decision(
+        self,
+        *,
+        signal: Signal,
+        entry_price: float,
+        size_fraction: float,
+        stop_price: float | None,
+        target_price: float | None,
+    ):
+        self._last_platform_risk_decision = build_btc_legacy_entry_risk_decision(
+            signal=signal,
+            equity=self.equity,
+            entry_price=entry_price,
+            size_fraction=size_fraction,
+            stop_price=stop_price,
+            target_price=target_price,
+        )
+        self._last_platform_risk_engine_decision = build_btc_legacy_entry_risk_engine_decision(
+            signal=signal,
+            equity=self.equity,
+            entry_price=entry_price,
+            size_fraction=size_fraction,
+            stop_price=stop_price,
+            target_price=target_price,
+            risk_engine=getattr(self, "_platform_risk_engine", None),
+        )
+        self._last_platform_risk_audit = build_btc_legacy_entry_risk_audit(
+            legacy_decision=self._last_platform_risk_decision,
+            engine_decision=self._last_platform_risk_engine_decision,
+            enforcement_enabled=getattr(self, "_ENFORCE_PLATFORM_RISK_ENGINE", False),
+            bar_index=self._bar_index(),
+        )
+        self._last_platform_pipeline_result = SignalPipeline(
+            signal_runner=SignalModuleRunner([]),
+            risk_engine=RiskEngine(RiskLimits()),
+            portfolio_engine=PortfolioEngine(layer_by_module=_BTC_PLATFORM_LAYER_BY_MODULE),
+        ).run_decisions(
+            [self._last_platform_risk_decision],
+            account=AccountState(equity=float(self.equity)),
+            bar_index=self._bar_index(),
+        )
+        if not hasattr(self, "_platform_pipeline_results"):
+            self._platform_pipeline_results = []
+        self._platform_pipeline_results.append(self._last_platform_pipeline_result)
+        self._last_platform_entry_order = self._platform_open_entry_order(
+            self._last_platform_pipeline_result
+        )
+        if not hasattr(self, "_platform_risk_audits"):
+            self._platform_risk_audits = []
+        self._platform_risk_audits.append(self._last_platform_risk_audit)
+        return self._last_platform_risk_decision
+
+    def _platform_open_entry_order(self, pipeline_result):
+        for order in getattr(pipeline_result.portfolio_plan, "orders", []):
+            action = getattr(order.action, "value", order.action)
+            if action == "open":
+                return order
+        return None
+
+    def _entry_order_parameters(
+        self,
+        *,
+        is_long: bool,
+        stop_price: float | None,
+        target_price: float | None,
+    ) -> tuple[bool, float | None, float | None]:
+        platform_order = getattr(self, "_last_platform_entry_order", None)
+        if platform_order is None:
+            return is_long, stop_price, target_price
+        order_is_long = platform_order.direction == Direction.LONG
+        order_stop = (
+            platform_order.stop_price
+            if platform_order.stop_price is not None
+            else stop_price
+        )
+        return order_is_long, order_stop, platform_order.target_price
+
+    def _platform_risk_engine_blocks_entry(self) -> bool:
+        if not getattr(self, "_ENFORCE_PLATFORM_RISK_ENGINE", False):
+            return False
+        decision = getattr(self, "_last_platform_risk_engine_decision", None)
+        return decision is not None and not decision.allowed
+
+    def _record_platform_close_pipeline(self, *, reason: str, portion: float | None = None):
+        position = getattr(self, "position", None)
+        if not position:
+            return None
+        entry_price = self._at("Close")
+        direction = Direction.LONG if position.is_long else Direction.SHORT
+        module = self._SIGNAL_MODULE
+        layer = _BTC_PLATFORM_LAYER_BY_MODULE.get(module, "tactical")
+        size_fraction = abs(float(getattr(position, "size", 0.0)))
+        decision_signal = Signal(
+            module=module,
+            symbol="BTC/USDT",
+            direction=direction,
+            score=0.0,
+            entry_reason=reason,
+            invalidation=reason,
+        )
+        decision = build_btc_legacy_entry_risk_decision(
+            signal=decision_signal,
+            equity=self.equity,
+            entry_price=entry_price,
+            size_fraction=size_fraction,
+            stop_price=getattr(self, "_trailing_sl", None),
+            target_price=None,
+            reason=f"{reason}_audit",
+        )
+        state = PortfolioState(positions={
+            PositionKey("BTC/USDT", layer): Position(
+                symbol="BTC/USDT",
+                layer=layer,
+                direction=direction,
+                quantity=decision.quantity,
+                notional=decision.notional,
+                risk_amount=decision.risk_amount,
+                module=module,
+                entry_price=entry_price,
+                stop_price=decision.stop_price,
+            )
+        })
+        risk_engine = RiskEngine(RiskLimits())
+        portfolio_engine = PortfolioEngine(
+            state=state,
+            layer_by_module=_BTC_PLATFORM_LAYER_BY_MODULE,
+        )
+        order = portfolio_engine.close_position(
+            "BTC/USDT",
+            layer,
+            fill_price=entry_price,
+            quantity=decision.quantity * float(portion) if portion is not None else decision.quantity,
+            reason=reason,
+            decision=decision,
+        )
+        self._last_platform_pipeline_result = PipelineResult(
+            signals=[decision_signal],
+            risk_decisions=[decision],
+            portfolio_plan=PortfolioPlan(orders=[order]),
+            delivery_results=[],
+            risk_diagnostics=risk_engine.budget_diagnostics(
+                AccountState(equity=float(self.equity)),
+                bar_index=self._bar_index(),
+            ),
+        )
+        if not hasattr(self, "_platform_pipeline_results"):
+            self._platform_pipeline_results = []
+        self._platform_pipeline_results.append(self._last_platform_pipeline_result)
+        return self._last_platform_pipeline_result
 
     def _day_id(self) -> int:
         ts = self.data.df.index[-1]
@@ -584,25 +788,33 @@ class BaseRiskStrategy(Strategy):
 
             # Partial TP (before trailing/invalidation 鈥?locks in profit)
             if self._check_partial_tp(is_long):
+                self._record_platform_close_pipeline(
+                    reason="partial_take_profit",
+                    portion=self._PARTIAL_TP_PCT,
+                )
                 self.position.close(portion=self._PARTIAL_TP_PCT)
                 self._partial_done = True
 
             # Time stop (insufficient momentum)
             if self._check_time_stop(is_long):
+                self._record_platform_close_pipeline(reason="time_stop")
                 self.position.close()
                 self._last_trade_bar = i
                 return
 
             self._update_trailing(is_long)
             if self._check_invalidation(is_long):
+                self._record_platform_close_pipeline(reason="invalidation")
                 self.position.close()
                 self._last_trade_bar = i
                 return
             if self._check_trailing_hit(is_long):
+                self._record_platform_close_pipeline(reason="trailing_stop")
                 self.position.close()
                 self._last_trade_bar = i
                 return
             if self._check_extra_exit(is_long):
+                self._record_platform_close_pipeline(reason="extra_exit")
                 self.position.close()
                 self._last_trade_bar = i
                 return
@@ -620,18 +832,22 @@ class BaseRiskStrategy(Strategy):
             allow_long = True
             allow_short = True
 
-        is_long = btc_base_entry_direction(
+        entry_signal = select_btc_base_entry_signal(
+            self.data.df.iloc[i],
+            symbol="BTC/USDT",
+            module=self._SIGNAL_MODULE,
+            long_column=self._LONG_COL,
+            short_column=self._SHORT_COL,
             regime=regime,
             daily_ema_dir=d_dir,
             weekly_ema_dir=w_dir,
             allow_long=allow_long,
             allow_short=allow_short,
-            long_score=float(self.data.df[self._LONG_COL].iloc[i]),
-            short_score=float(self.data.df[self._SHORT_COL].iloc[i]),
             score_threshold=self._SCORE_THRESHOLD,
         )
-        if is_long is None:
+        if entry_signal is None:
             return
+        is_long = entry_signal.direction == Direction.LONG
 
         result = self._calc_sl_tp(is_long, regime)
         if result is None:
@@ -656,12 +872,28 @@ class BaseRiskStrategy(Strategy):
         if plan is None:
             return
 
+        self._record_legacy_entry_risk_decision(
+            signal=entry_signal,
+            entry_price=plan.entry_price,
+            size_fraction=plan.size,
+            stop_price=plan.stop_price,
+            target_price=plan.target_price,
+        )
+        if self._platform_risk_engine_blocks_entry():
+            return
+
         self._eq_before_close = self.equity  # snapshot for PnL tracking
 
-        if plan.is_long:
-            self.buy(size=plan.size, sl=plan.stop_price, tp=plan.target_price)
+        order_is_long, order_stop, order_target = self._entry_order_parameters(
+            is_long=plan.is_long,
+            stop_price=plan.stop_price,
+            target_price=plan.target_price,
+        )
+
+        if order_is_long:
+            self.buy(size=plan.size, sl=order_stop, tp=order_target)
         else:
-            self.sell(size=plan.size, sl=plan.stop_price, tp=plan.target_price)
+            self.sell(size=plan.size, sl=order_stop, tp=order_target)
 
         self._trailing_sl = plan.trailing_stop
         self._extreme_since_entry = plan.extreme_since_entry
@@ -724,6 +956,7 @@ class PullbackStrategy(ATRHTFStopStrategy):
 
     _LONG_COL = "score_pullback_long"
     _SHORT_COL = "score_pullback_short"
+    _SIGNAL_MODULE = "pullback"
     _USE_REGIME_GATE = True
     _SCORE_THRESHOLD = 75
     _RISK_PER_TRADE = 0.0050  # 0.50% per pullback trade
@@ -757,6 +990,7 @@ class BreakoutStrategy(ATRHTFStopStrategy):
 
     _LONG_COL = "score_breakout_long"
     _SHORT_COL = "score_breakout_short"
+    _SIGNAL_MODULE = "breakout"
     _USE_REGIME_GATE = True
     _USE_FIXED_TP = False
     _BREAKOUT_MODE = True
@@ -817,6 +1051,7 @@ class MeanRevStrategy(BaseRiskStrategy):
 
     _LONG_COL = "score_meanrev_long"
     _SHORT_COL = "score_meanrev_short"
+    _SIGNAL_MODULE = "meanrev"
     _USE_REGIME_GATE = True
     _USE_FIXED_TP = True
     _BREAKOUT_MODE = False
@@ -930,9 +1165,12 @@ class DualLayerStrategy(BaseRiskStrategy):
             return True
         return df.index[i].day != df.index[i + 1].day
 
-    def _core_entry_signal(self) -> bool:
+    def _core_entry_standard_signal(self) -> Signal | None:
         """Core enters only in strict Bull regime (regime == 1)."""
-        return btc_core_entry_signal(regime=self._current_regime())
+        return select_btc_core_entry_signal(symbol="BTC/USDT", regime=self._current_regime())
+
+    def _core_entry_signal(self) -> bool:
+        return self._core_entry_standard_signal() is not None
 
     def _core_exit_signal(self) -> bool:
         """Core exits on weekly failure or 2 daily closes below EMA169."""
@@ -958,23 +1196,51 @@ class DualLayerStrategy(BaseRiskStrategy):
         )
         return stop_hit
 
-    def _core_add_signal(self) -> bool:
+    def _core_add_standard_signal(self) -> Signal | None:
         """Add to core on pullback long signal."""
-        return btc_core_add_signal(
-            pullback_long=bool(self.data.df["pullback_long"].iloc[self._bar_index()])
+        return select_btc_core_add_signal(
+            self.data.df.iloc[self._bar_index()],
+            symbol="BTC/USDT",
         )
+
+    def _core_add_signal(self) -> bool:
+        return self._core_add_standard_signal() is not None
 
     # 鈹€鈹€ Bear core helpers 鈹€鈹€
 
-    def _bear_core_probe_signal(self) -> bool:
-        """Bear core probe: daily bearish + below 20-day swing low."""
-        return btc_bear_core_probe_signal(
+    def _bear_core_probe_standard_signal(self) -> Signal | None:
+        """Bear core probe: top exhaustion and neckline-break permission."""
+        return select_btc_bear_core_probe_signal(
+            self.data.df.iloc[self._bar_index()],
+            symbol="BTC/USDT",
             core_active=self._core_active,
             bear_core_active=self._bear_core_active,
-            close=self._at("Close"),
-            daily_ema_dir=self._at("_d_ema_dir"),
-            daily_ema=self._at("_d_ema_169"),
-            daily_swing_low_20=self._at("_daily_swing_low_20"),
+        )
+
+    def _bear_core_probe_signal(self) -> bool:
+        return self._bear_core_probe_standard_signal() is not None
+
+    def _bear_core_confirm_add_standard_signal(self) -> Signal | None:
+        """Bear core stage-2 add after the probe has proven itself."""
+        return select_btc_bear_core_confirm_add_signal(
+            self.data.df.iloc[self._bar_index()],
+            symbol="BTC/USDT",
+            bar_index=self._bar_index(),
+            entry_bar=getattr(self, '_bear_core_entry_bar', -10**9),
+            active=self._bear_core_active,
+            stage=getattr(self, '_bear_core_stage', 0),
+            probe_peak_r=getattr(self, '_bear_probe_peak_r', 0.0),
+        )
+
+    def _bear_core_acceleration_add_standard_signal(self) -> Signal | None:
+        """Bear core stage-3 add when trend and DMI confirm acceleration."""
+        return select_btc_bear_core_acceleration_add_signal(
+            self.data.df.iloc[self._bar_index()],
+            symbol="BTC/USDT",
+            bar_index=self._bar_index(),
+            last_trade_bar=getattr(self, '_last_trade_bar', -10**9),
+            active=self._bear_core_active,
+            stage=getattr(self, '_bear_core_stage', 0),
         )
 
     def _bear_core_confirm_signal(self) -> bool:
@@ -1001,6 +1267,14 @@ class DualLayerStrategy(BaseRiskStrategy):
         )
         if not triggered:
             return False
+        self._record_layer_close_pipeline(
+            layer="bear_core",
+            module=self._bear_core_close_module(),
+            direction=Direction.SHORT,
+            layer_size=self._bear_core_size,
+            reason="bear_core_waterfall_guard",
+            portion=close_fraction,
+        )
         self._close_portion(close_fraction)
         self._waterfall_lock_r = lock_r
         self._bear_core_stage = next_stage
@@ -1059,8 +1333,8 @@ class DualLayerStrategy(BaseRiskStrategy):
 
     # 鈹€鈹€ Tactical helpers 鈹€鈹€
 
-    def _tactical_signals(self) -> tuple[bool, bool, str]:
-        """Priority-ordered signal selection per market regime.
+    def _tactical_signal(self) -> Signal | None:
+        """Return the priority-ordered tactical signal for the current bar.
 
         Framework:
           Strong Bull (r=1)        鈫?BO long + PB long + core; NO shorts
@@ -1072,142 +1346,32 @@ class DualLayerStrategy(BaseRiskStrategy):
         """
         regime = self._current_regime()
         i = self._bar_index()
-        df = self.data.df
-        d_dir = self._at("_d_ema_dir")
-        w_dir = self._at("_w_ema_dir")
-
-        strong_bull = regime == 1
-        strong_bear = regime == 2
-        weak_bull = not strong_bull and d_dir >= 0 and w_dir >= 0
-        ranging = regime == 0
-        compression = regime == 3
-
-        # New tactical v2 scores (Modules 1-5)
-        score_bo_retest_l = float(df["score_breakout_retest_long"].iloc[i])
-        score_pb_struct_l = float(df["score_pullback_struct_long"].iloc[i])
-        score_pb_struct_s = float(df["score_pullback_struct_short"].iloc[i])
-        score_mr_range_l = float(df["score_meanrev_range_long"].iloc[i])
-        score_mr_range_s = float(df["score_meanrev_range_short"].iloc[i])
-        score_sweep_l = float(df["score_sweep_reversal_long"].iloc[i])
-        score_sweep_s = float(df["score_sweep_reversal_short"].iloc[i])
-        # Bonuses
-        deriv_bonus = float(df["_short_deriv_bonus"].iloc[i]) if "_short_deriv_bonus" in df.columns else 0.0
-        pa_bonus = float(df["_price_action_bonus"].iloc[i]) if "_price_action_bonus" in df.columns else 0.0
-        fb_bonus = 5 if bool(df["_failed_bounce_gate"].iloc[i]) else 0
-        perp_long_bonus = float(df["_perp_crowding_long_bonus"].iloc[i]) if "_perp_crowding_long_bonus" in df.columns else 0.0
-        # Short scores with bonuses
-        score_pb_s = score_pb_struct_s + fb_bonus + deriv_bonus + pa_bonus
-        score_crash_s = float(df["score_crash_short"].iloc[i]) + deriv_bonus + pa_bonus
-        score_bt_s = float(df["score_bull_trap_short"].iloc[i]) + deriv_bonus + pa_bonus
-        bt_gate = bool(df["_bull_trap_signal"].iloc[i])
-        bo_retest_th = 70   # Module 1: Breakout Retest
-        pb_struct_th = 70   # Module 2: Trend Pullback Structure
-        mr_range_th = 75    # Module 3: Enhanced Range BB MR
-        sweep_th = 65       # Module 4: Liquidity Sweep Reversal
-        sweep_gate_l = bool(df["_sweep_signal_long"].iloc[i])
-        sweep_gate_s = bool(df["_sweep_signal_short"].iloc[i])
+        row = self.data.df.iloc[i]
+        sweep_gate_l = bool(row.get("_sweep_signal_long", False))
+        sweep_gate_s = bool(row.get("_sweep_signal_short", False))
         # MTF (15m) confirmation bonuses
         mtf_confirm_l = self._mtf_no_new_extreme(True) if sweep_gate_l else False
         mtf_confirm_s = self._mtf_no_new_extreme(False) if sweep_gate_s else False
         mtf_hl = self._mtf_higher_low_formed()  # higher low for retest/pullback
-        sweep_score_l = score_sweep_l + (10 if mtf_confirm_l else 0)
-        sweep_score_s = score_sweep_s + (10 if mtf_confirm_s else 0)
-        retest_score_l = score_bo_retest_l + (5 if mtf_hl else 0)
-        struct_score_l = score_pb_struct_l + (5 if mtf_hl else 0)
-        crash_th = 75  # 鈮?5 (asymmetric weights)
-        pb_th_s = 999  # disabled (PF<1 in BTC)
-        bt_th = 80  # 鈮?0
-        mr_th_s = 85  # 鈮?5 (if enabled)
-        rsi_val = float(df["rsi_14"].iloc[i])
-        rsi_ok = rsi_val >= self.risk_cfg.short_rsi_floor
-        late_chase_bar = bool(df["_late_chase"].iloc[i])
-        late_ok = not late_chase_bar
-        d_ema_val = self._at("_d_ema_169")
-        close_val = self._at("Close")
-
-        # 鈹€鈹€ Bull Guard: structural bull 鈫?block ALL shorts 鈹€鈹€
-        bull_guard = bool(df["_bull_guard"].iloc[i]) or self._core_active
-        if bull_guard:
-            # All short modules blocked; only allow longs
-            pass  # fall through to long-only logic below
-
-        # 鈹€鈹€ Top Exhaustion Probe 鈹€鈹€
-        top_score_val = float(df["_top_exhaustion_score"].iloc[i])
-        double_top_sig = bool(df["_double_top_signal"].iloc[i])
-        probe_allowed = not bull_guard and not self._bear_core_active and double_top_sig and top_score_val >= 70
-
-        # 鈹€鈹€ Layered Short Gates 鈹€鈹€
-        short_env_ok = (
-            not bull_guard and regime != 4 and rsi_ok and late_ok
+        return select_btc_tactical_signal(
+            row,
+            symbol="BTC/USDT",
+            regime=regime,
+            daily_ema_dir=self._at("_d_ema_dir"),
+            weekly_ema_dir=self._at("_w_ema_dir"),
+            core_active=self._core_active,
+            bear_core_active=self._bear_core_active,
+            short_rsi_floor=self.risk_cfg.short_rsi_floor,
+            mtf_no_new_extreme_long=mtf_confirm_l,
+            mtf_no_new_extreme_short=mtf_confirm_s,
+            mtf_higher_low=mtf_hl,
         )
-        short_trend_ok = short_env_ok and close_val < d_ema_val and d_dir <= 0
-        short_aggressive_ok = short_trend_ok and w_dir <= 0
 
-        # 鈹€鈹€ Ranging: range MR + sweep 鈹€鈹€
-        if ranging:
-            if score_mr_range_l >= mr_range_th:
-                return True, False, "meanrev_range"
-            if sweep_gate_l and sweep_score_l + perp_long_bonus >= sweep_th:
-                return True, False, "sweep_reversal"
-            if sweep_gate_s and sweep_score_s >= sweep_th:
-                return False, True, "sweep_reversal"
+    def _tactical_signals(self) -> tuple[bool, bool, str]:
+        signal = self._tactical_signal()
+        if signal is None:
             return False, False, "none"
-
-        # 鈹€鈹€ Strong Bear: crash > struct > sweep > bull-trap 鈹€鈹€
-        if strong_bear:
-            if short_aggressive_ok and score_crash_s >= crash_th:
-                return False, True, "crash"
-            if short_trend_ok and score_pb_s >= pb_th_s:
-                return False, True, "pullback_struct"
-            if sweep_gate_s and sweep_score_s >= sweep_th:
-                return False, True, "sweep_reversal"
-            if short_env_ok and bt_gate and score_bt_s >= bt_th:
-                return False, True, "bull_trap"
-            return False, False, "none"
-
-        # 鈹€鈹€ Weak Bear / Transition: struct + sweep + bull-trap 鈹€鈹€
-        if not strong_bull and not ranging and not compression:
-            if short_trend_ok and score_pb_s >= pb_th_s:
-                return False, True, "pullback_struct"
-            if sweep_gate_s and sweep_score_s >= sweep_th:
-                return False, True, "sweep_reversal"
-            if short_env_ok and bt_gate and score_bt_s >= bt_th:
-                return False, True, "bull_trap"
-            return False, False, "none"
-
-        # 鈹€鈹€ Strong Bull: retest > struct > sweep > range 鈹€鈹€
-        if strong_bull:
-            if retest_score_l >= bo_retest_th:
-                return True, False, "breakout_retest"
-            if score_pb_struct_l + perp_long_bonus >= pb_struct_th:
-                return True, False, "pullback_struct"
-            if sweep_gate_l and sweep_score_l + perp_long_bonus >= sweep_th:
-                return True, False, "sweep_reversal"
-            if score_mr_range_l >= mr_range_th:
-                return True, False, "meanrev_range"
-            return False, False, "none"
-
-        # 鈹€鈹€ Compression: retest + sweep 鈹€鈹€
-        if compression:
-            if retest_score_l >= bo_retest_th:
-                return True, False, "breakout_retest"
-            if sweep_gate_l and sweep_score_l >= sweep_th:
-                return True, False, "sweep_reversal"
-            return False, False, "none"
-
-        # 鈹€鈹€ Weak Bull / Transition: retest + struct + sweep 鈹€鈹€
-        if weak_bull:
-            if retest_score_l >= bo_retest_th:
-                return True, False, "breakout_retest"
-            if score_pb_struct_l + perp_long_bonus >= pb_struct_th:
-                return True, False, "pullback_struct"
-            if sweep_gate_l and sweep_score_l + perp_long_bonus >= sweep_th:
-                return True, False, "sweep_reversal"
-            if score_mr_range_l >= mr_range_th:
-                return True, False, "meanrev_range"
-            return False, False, "none"
-
-        return False, False, "none"
+        return signal.direction == Direction.LONG, signal.direction == Direction.SHORT, signal.module
 
     def _check_partial_tp(self, is_long: bool) -> bool:
         """Short-specific partial TP: crash=40%@1R+30%@2R, others=disabled."""
@@ -1373,6 +1537,82 @@ class DualLayerStrategy(BaseRiskStrategy):
         if portion > 0:
             self.position.close(portion=portion)
 
+    def _bear_core_close_module(self) -> str:
+        stage = getattr(self, "_bear_core_stage", 0)
+        if stage >= 3:
+            return "bear_core_acceleration"
+        if stage >= 2:
+            return "bear_core_confirm"
+        return "bear_core_probe"
+
+    def _record_layer_close_pipeline(
+        self,
+        *,
+        layer: str,
+        module: str,
+        direction: Direction,
+        layer_size: float,
+        reason: str,
+        portion: float | None = None,
+    ):
+        entry_price = self._at("Close")
+        decision_signal = Signal(
+            module=module,
+            symbol="BTC/USDT",
+            direction=direction,
+            score=0.0,
+            entry_reason=reason,
+            invalidation=reason,
+        )
+        decision = build_btc_legacy_entry_risk_decision(
+            signal=decision_signal,
+            equity=self.equity,
+            entry_price=entry_price,
+            size_fraction=abs(float(layer_size)),
+            stop_price=None,
+            target_price=None,
+            reason=f"{reason}_audit",
+        )
+        state = PortfolioState(positions={
+            PositionKey("BTC/USDT", layer): Position(
+                symbol="BTC/USDT",
+                layer=layer,
+                direction=direction,
+                quantity=decision.quantity,
+                notional=decision.notional,
+                risk_amount=decision.risk_amount,
+                module=module,
+                entry_price=entry_price,
+            )
+        })
+        risk_engine = RiskEngine(RiskLimits())
+        portfolio_engine = PortfolioEngine(
+            state=state,
+            layer_by_module=_BTC_PLATFORM_LAYER_BY_MODULE,
+        )
+        order = portfolio_engine.close_position(
+            "BTC/USDT",
+            layer,
+            fill_price=entry_price,
+            quantity=decision.quantity * float(portion) if portion is not None else decision.quantity,
+            reason=reason,
+            decision=decision,
+        )
+        self._last_platform_pipeline_result = PipelineResult(
+            signals=[decision_signal],
+            risk_decisions=[decision],
+            portfolio_plan=PortfolioPlan(orders=[order]),
+            delivery_results=[],
+            risk_diagnostics=risk_engine.budget_diagnostics(
+                AccountState(equity=float(self.equity)),
+                bar_index=self._bar_index(),
+            ),
+        )
+        if not hasattr(self, "_platform_pipeline_results"):
+            self._platform_pipeline_results = []
+        self._platform_pipeline_results.append(self._last_platform_pipeline_result)
+        return self._last_platform_pipeline_result
+
     # 鈹€鈹€ Main loop 鈹€鈹€
 
     def next(self):
@@ -1410,6 +1650,13 @@ class DualLayerStrategy(BaseRiskStrategy):
             core_size=self._core_size,
         )
         if core_exit_plan.should_exit:
+            self._record_layer_close_pipeline(
+                layer="core",
+                module="core_long",
+                direction=Direction.LONG,
+                layer_size=core_exit_plan.layer_size,
+                reason="core_exit",
+            )
             self._close_layer(core_exit_plan.layer_size)
             self._core_active = core_exit_plan.core_active
             self._core_size = core_exit_plan.core_size
@@ -1435,6 +1682,13 @@ class DualLayerStrategy(BaseRiskStrategy):
                 days_above_dema=self._days_above_dema,
             )
             if v_reversal_exit_plan.should_exit:
+                self._record_layer_close_pipeline(
+                    layer="bear_core",
+                    module=self._bear_core_close_module(),
+                    direction=Direction.SHORT,
+                    layer_size=v_reversal_exit_plan.layer_size,
+                    reason="bear_core_v_reversal_exit",
+                )
                 self._close_layer(v_reversal_exit_plan.layer_size)
                 self._bear_core_active = v_reversal_exit_plan.bear_core_active
                 self._bear_core_size = v_reversal_exit_plan.bear_core_size
@@ -1450,6 +1704,13 @@ class DualLayerStrategy(BaseRiskStrategy):
                 bear_core_size=self._bear_core_size,
             )
             if giveback_exit_plan.should_exit:
+                self._record_layer_close_pipeline(
+                    layer="bear_core",
+                    module=self._bear_core_close_module(),
+                    direction=Direction.SHORT,
+                    layer_size=giveback_exit_plan.layer_size,
+                    reason="bear_core_giveback_exit",
+                )
                 self._close_layer(giveback_exit_plan.layer_size)
                 self._bear_core_active = giveback_exit_plan.bear_core_active
                 self._bear_core_size = giveback_exit_plan.bear_core_size
@@ -1473,6 +1734,13 @@ class DualLayerStrategy(BaseRiskStrategy):
                 days_above_dema=self._days_above_dema,
             )
             if runner_exit_plan.should_exit:
+                self._record_layer_close_pipeline(
+                    layer="bear_core",
+                    module=self._bear_core_close_module(),
+                    direction=Direction.SHORT,
+                    layer_size=runner_exit_plan.layer_size,
+                    reason="bear_core_waterfall_runner_exit",
+                )
                 self._close_layer(runner_exit_plan.layer_size)
                 self._bear_core_active = runner_exit_plan.bear_core_active
                 self._bear_core_size = runner_exit_plan.bear_core_size
@@ -1491,6 +1759,13 @@ class DualLayerStrategy(BaseRiskStrategy):
             days_above_dema=self._days_above_dema,
         )
         if bear_trend_exit_plan.should_exit:
+            self._record_layer_close_pipeline(
+                layer="bear_core",
+                module=self._bear_core_close_module(),
+                direction=Direction.SHORT,
+                layer_size=bear_trend_exit_plan.layer_size,
+                reason="bear_core_trend_exit",
+            )
             self._close_layer(bear_trend_exit_plan.layer_size)
             self._bear_core_active = bear_trend_exit_plan.bear_core_active
             self._bear_core_size = bear_trend_exit_plan.bear_core_size
@@ -1533,6 +1808,13 @@ class DualLayerStrategy(BaseRiskStrategy):
 
         # 鈹€鈹€ Tactical exit check (before entry) 鈹€鈹€
         if self._tac_direction != 0 and self._check_tactical_exit():
+            self._record_layer_close_pipeline(
+                layer="tactical",
+                module=getattr(self, "_tac_module", "tactical"),
+                direction=Direction.LONG if self._tac_direction == 1 else Direction.SHORT,
+                layer_size=self._tac_size,
+                reason="tactical_exit",
+            )
             close_plan = btc_tactical_exit_close_plan(
                 total_position_size=self._current_position_size(),
                 tactical_size=self._tac_size,
@@ -1554,15 +1836,26 @@ class DualLayerStrategy(BaseRiskStrategy):
             return
 
         # 鈹€鈹€ Core entry 鈹€鈹€
+        core_entry_signal = self._core_entry_standard_signal() if not self._core_active else None
         core_entry_plan = btc_core_entry_plan(
             core_active=self._core_active,
-            entry_signal=self._core_entry_signal() if not self._core_active else False,
+            entry_signal=core_entry_signal is not None,
             entry_price=self._at("Close"),
             core_size=rcfg.risk_core_alloc,
             equity=self.equity,
             bar_index=i,
         )
         if core_entry_plan.should_enter:
+            if core_entry_signal is not None:
+                self._record_legacy_entry_risk_decision(
+                    signal=core_entry_signal,
+                    entry_price=core_entry_plan.entry_price,
+                    size_fraction=core_entry_plan.core_size,
+                    stop_price=None,
+                    target_price=None,
+                )
+                if self._platform_risk_engine_blocks_entry():
+                    return
             self._core_active = core_entry_plan.core_active
             self._core_entry_price = core_entry_plan.entry_price
             self._core_highest_close = core_entry_plan.highest_close
@@ -1571,7 +1864,25 @@ class DualLayerStrategy(BaseRiskStrategy):
             self._eq_snapshot = core_entry_plan.equity_snapshot
             # Core long: NO hard SL 鈥?uses manual trend-failure exit only.
             # Flash crashes (liquidity grabs) must not shake out strategic longs.
-            self._enter_long(self._core_size, tag=core_entry_plan.order_tag)
+            order_is_long, order_stop, order_target = self._entry_order_parameters(
+                is_long=True,
+                stop_price=None,
+                target_price=None,
+            )
+            if order_is_long:
+                self._enter_long(
+                    self._core_size,
+                    tag=core_entry_plan.order_tag,
+                    sl=order_stop,
+                    tp=order_target,
+                )
+            else:
+                self._enter_short(
+                    self._core_size,
+                    tag=core_entry_plan.order_tag,
+                    sl=order_stop,
+                    tp=order_target,
+                )
             self._last_trade_bar = core_entry_plan.last_trade_bar
 
         # 鈹€鈹€ Flash crash dip-buy (tactical long add-on) 鈹€鈹€
@@ -1583,36 +1894,91 @@ class DualLayerStrategy(BaseRiskStrategy):
             bar_index=i,
         )
         if dip_buy_plan.should_enter:
+            dip_buy_signal = select_btc_flash_crash_dip_buy_signal(
+                symbol="BTC/USDT",
+                should_enter=dip_buy_plan.should_enter,
+            )
+            if dip_buy_signal is not None:
+                self._record_legacy_entry_risk_decision(
+                    signal=dip_buy_signal,
+                    entry_price=dip_buy_plan.entry_price,
+                    size_fraction=dip_buy_plan.size,
+                    stop_price=dip_buy_plan.stop_price,
+                    target_price=dip_buy_plan.target_price,
+                )
+                if self._platform_risk_engine_blocks_entry():
+                    return
+            order_is_long, order_stop, order_target = self._entry_order_parameters(
+                is_long=dip_buy_plan.is_long,
+                stop_price=dip_buy_plan.stop_price,
+                target_price=dip_buy_plan.target_price,
+            )
             self._tac_direction = dip_buy_plan.direction
             self._tac_entry_price = dip_buy_plan.entry_price
-            self._tac_sl = dip_buy_plan.stop_price
-            self._tac_tp = dip_buy_plan.target_price
+            self._tac_sl = order_stop
+            self._tac_tp = order_target
             self._tac_size = dip_buy_plan.size
             self._tac_entry_bar = dip_buy_plan.entry_bar
             self._tac_module = dip_buy_plan.module
-            self._enter_long(
-                self._tac_size,
-                tag=dip_buy_plan.order_tag,
-                sl=self._tac_sl,
-                tp=self._tac_tp,
-            )
+            if order_is_long:
+                self._enter_long(
+                    self._tac_size,
+                    tag=dip_buy_plan.order_tag,
+                    sl=order_stop,
+                    tp=order_target,
+                )
+            else:
+                self._enter_short(
+                    self._tac_size,
+                    tag=dip_buy_plan.order_tag,
+                    sl=order_stop,
+                    tp=order_target,
+                )
             self._last_trade_bar = dip_buy_plan.last_trade_bar
 
         # 鈹€鈹€ Core add-on (pullback in bull) 鈹€鈹€
         if self._core_active and not hasattr(self, "_core_fully_loaded"):
             self._core_fully_loaded = False
         core_fully_loaded = getattr(self, "_core_fully_loaded", True)
-        core_add_signal = self._core_add_signal() if self._core_active and not core_fully_loaded else False
+        core_add_signal = self._core_add_standard_signal() if self._core_active and not core_fully_loaded else None
         should_core_add, add_size, new_core_size, new_core_fully_loaded = btc_core_add_plan(
             core_active=self._core_active,
             core_fully_loaded=core_fully_loaded,
-            core_add_signal=core_add_signal,
+            core_add_signal=core_add_signal is not None,
             core_size=self._core_size,
             max_position_frac=max_pos,
             risk_cfg=rcfg,
         )
         if should_core_add:
-            self._enter_long(add_size, tag="core_add_long")
+            if core_add_signal is not None:
+                self._record_legacy_entry_risk_decision(
+                    signal=core_add_signal,
+                    entry_price=self._at("Close"),
+                    size_fraction=add_size,
+                    stop_price=None,
+                    target_price=None,
+                )
+                if self._platform_risk_engine_blocks_entry():
+                    return
+            order_is_long, order_stop, order_target = self._entry_order_parameters(
+                is_long=True,
+                stop_price=None,
+                target_price=None,
+            )
+            if order_is_long:
+                self._enter_long(
+                    add_size,
+                    tag="core_add_long",
+                    sl=order_stop,
+                    tp=order_target,
+                )
+            else:
+                self._enter_short(
+                    add_size,
+                    tag="core_add_long",
+                    sl=order_stop,
+                    tp=order_target,
+                )
             core_add_state_plan = btc_core_add_state_plan(
                 should_core_add=should_core_add,
                 new_core_size=new_core_size,
@@ -1626,8 +1992,13 @@ class DualLayerStrategy(BaseRiskStrategy):
         # 鈹€鈹€ Bear Core 3-stage entry (Probe 鈫?Confirm 鈫?Acceleration) 鈹€鈹€
         # Stage 1: Probe (top exhaustion + neckline break) 鈫?bear group gate
         _df = self.data.df
-        top_score_val = float(_df["_top_exhaustion_score"].iloc[i]) if "_top_exhaustion_score" in _df.columns else 0
-        double_top_sig = bool(_df["_double_top_signal"].iloc[i]) if "_double_top_signal" in _df.columns else False
+        bear_probe_signal = self._bear_core_probe_standard_signal()
+        top_score_val = (
+            bear_probe_signal.score
+            if bear_probe_signal is not None
+            else float(_df["_top_exhaustion_score"].iloc[i]) if "_top_exhaustion_score" in _df.columns else 0
+        )
+        double_top_sig = bear_probe_signal is not None
         bull_guard = bool(_df["_bull_guard"].iloc[i]) if "_bull_guard" in _df.columns else False
         (
             should_probe,
@@ -1672,6 +2043,21 @@ class DualLayerStrategy(BaseRiskStrategy):
                 days_above_dema=self._days_above_dema,
                 equity_snapshot=getattr(self, "_eq_snapshot", self.equity),
             )
+            bc_sl = btc_bear_core_stop(
+                entry_price=probe_entry_plan.bear_core_entry_price,
+                atr_4h=self._at("_atr"),
+                risk_cfg=rcfg,
+            )
+            if bear_probe_signal is not None:
+                self._record_legacy_entry_risk_decision(
+                    signal=bear_probe_signal,
+                    entry_price=probe_entry_plan.bear_core_entry_price,
+                    size_fraction=probe_entry_plan.bear_core_size,
+                    stop_price=bc_sl,
+                    target_price=None,
+                )
+                if self._platform_risk_engine_blocks_entry():
+                    return
             self._bear_core_active = probe_entry_plan.bear_core_active
             self._bear_core_stage = probe_entry_plan.bear_core_stage
             self._bear_core_entry_price = probe_entry_plan.bear_core_entry_price
@@ -1685,11 +2071,29 @@ class DualLayerStrategy(BaseRiskStrategy):
             self._bear_group_peak_r = probe_entry_plan.bear_group_peak_r
             self._days_above_dema = probe_entry_plan.days_above_dema
             self._eq_snapshot = probe_entry_plan.equity_snapshot
-            bc_sl = self._bear_core_sl()
-            self._enter_short(self._bear_core_size, tag="bear_core", sl=bc_sl)
+            order_is_long, order_stop, order_target = self._entry_order_parameters(
+                is_long=False,
+                stop_price=bc_sl,
+                target_price=None,
+            )
+            if order_is_long:
+                self._enter_long(
+                    self._bear_core_size,
+                    tag="bear_core",
+                    sl=order_stop,
+                    tp=order_target,
+                )
+            else:
+                self._enter_short(
+                    self._bear_core_size,
+                    tag="bear_core",
+                    sl=order_stop,
+                    tp=order_target,
+                )
             self._last_trade_bar = probe_entry_plan.last_trade_bar
 
         # Stage 2: Confirm (prove + trend + group cap)
+        bear_confirm_signal = self._bear_core_confirm_add_standard_signal()
         (
             should_confirm_add,
             confirm_add_size,
@@ -1699,7 +2103,7 @@ class DualLayerStrategy(BaseRiskStrategy):
         ) = btc_bear_core_confirm_add_plan(
             bar_index=i,
             entry_bar=getattr(self, '_bear_core_entry_bar', -10**9),
-            active=self._bear_core_active,
+            active=bear_confirm_signal is not None,
             stage=getattr(self, '_bear_core_stage', 0),
             probe_peak_r=getattr(self, '_bear_probe_peak_r', 0.0),
             daily_ema_dir=self._at("_d_ema_dir"),
@@ -1713,7 +2117,35 @@ class DualLayerStrategy(BaseRiskStrategy):
         )
         if should_confirm_add:
             bc_sl = self._bear_core_sl()
-            self._enter_short(confirm_add_size, tag="bear_core", sl=bc_sl)
+            if bear_confirm_signal is not None:
+                self._record_legacy_entry_risk_decision(
+                    signal=bear_confirm_signal,
+                    entry_price=self._at("Close"),
+                    size_fraction=confirm_add_size,
+                    stop_price=bc_sl,
+                    target_price=None,
+                )
+                if self._platform_risk_engine_blocks_entry():
+                    return
+            order_is_long, order_stop, order_target = self._entry_order_parameters(
+                is_long=False,
+                stop_price=bc_sl,
+                target_price=None,
+            )
+            if order_is_long:
+                self._enter_long(
+                    confirm_add_size,
+                    tag="bear_core",
+                    sl=order_stop,
+                    tp=order_target,
+                )
+            else:
+                self._enter_short(
+                    confirm_add_size,
+                    tag="bear_core",
+                    sl=order_stop,
+                    tp=order_target,
+                )
             confirm_state_plan = btc_bear_core_confirm_add_state_plan(
                 should_confirm_add=should_confirm_add,
                 bar_index=i,
@@ -1731,6 +2163,7 @@ class DualLayerStrategy(BaseRiskStrategy):
             self._last_trade_bar = confirm_state_plan.last_trade_bar
 
         # Stage 3: Acceleration (group cap + trend confirmed)
+        bear_accel_signal = self._bear_core_acceleration_add_standard_signal()
         adx_val = float(self.data.df["_adx_signal"].iloc[i]) if "_adx_signal" in self.data.df.columns else 0
         plus_di = float(self.data.df["_plus_di"].iloc[i]) if "_plus_di" in self.data.df.columns else 0
         minus_di = float(self.data.df["_minus_di"].iloc[i]) if "_minus_di" in self.data.df.columns else 0
@@ -1743,7 +2176,7 @@ class DualLayerStrategy(BaseRiskStrategy):
         ) = btc_bear_core_acceleration_add_plan(
             bar_index=i,
             last_trade_bar=getattr(self, '_last_trade_bar', -10**9),
-            active=self._bear_core_active,
+            active=bear_accel_signal is not None,
             stage=getattr(self, '_bear_core_stage', 0),
             daily_ema_dir=self._at("_d_ema_dir"),
             adx=adx_val,
@@ -1756,7 +2189,35 @@ class DualLayerStrategy(BaseRiskStrategy):
         )
         if should_accel_add:
             bc_sl = self._bear_core_sl()
-            self._enter_short(accel_add_size, tag="bear_core", sl=bc_sl)
+            if bear_accel_signal is not None:
+                self._record_legacy_entry_risk_decision(
+                    signal=bear_accel_signal,
+                    entry_price=self._at("Close"),
+                    size_fraction=accel_add_size,
+                    stop_price=bc_sl,
+                    target_price=None,
+                )
+                if self._platform_risk_engine_blocks_entry():
+                    return
+            order_is_long, order_stop, order_target = self._entry_order_parameters(
+                is_long=False,
+                stop_price=bc_sl,
+                target_price=None,
+            )
+            if order_is_long:
+                self._enter_long(
+                    accel_add_size,
+                    tag="bear_core",
+                    sl=order_stop,
+                    tp=order_target,
+                )
+            else:
+                self._enter_short(
+                    accel_add_size,
+                    tag="bear_core",
+                    sl=order_stop,
+                    tp=order_target,
+                )
             accel_state_plan = btc_bear_core_acceleration_add_state_plan(
                 should_accel_add=should_accel_add,
                 target_size=accel_target_size,
@@ -1773,22 +2234,22 @@ class DualLayerStrategy(BaseRiskStrategy):
         # 鈹€鈹€ Tactical entry 鈹€鈹€
         regime = self._current_regime()
         if regime != 4 and self._tac_direction == 0:
-            long_sig, short_sig, _module = self._tactical_signals()
-            if long_sig or short_sig:
-                is_long = long_sig and not short_sig
+            signal = self._tactical_signal()
+            if signal is not None:
+                is_long = signal.direction == Direction.LONG
                 result = self._tactical_sl_tp(is_long)
                 if result:
                     sl, tp = result
                     entry = self._at("Close")
                     entry_plan = btc_tactical_entry_plan(
-                        long_signal=long_sig,
-                        short_signal=short_sig,
-                        module=_module,
+                        long_signal=signal.direction == Direction.LONG,
+                        short_signal=signal.direction == Direction.SHORT,
+                        module=signal.module,
                         entry=entry,
                         stop=sl,
                         target=tp,
                         position_size=calculate_btc_tactical_position_size(
-                            module=_module,
+                            module=signal.module,
                             is_long=is_long,
                             entry=entry,
                             stop=sl,
@@ -1797,7 +2258,21 @@ class DualLayerStrategy(BaseRiskStrategy):
                         bar_index=i,
                     )
                     if entry_plan.should_enter:
-                        self._tac_direction = entry_plan.direction
+                        self._record_legacy_entry_risk_decision(
+                            signal=signal,
+                            entry_price=entry_plan.entry_price,
+                            size_fraction=entry_plan.size,
+                            stop_price=entry_plan.stop_price,
+                            target_price=entry_plan.target_price,
+                        )
+                        if self._platform_risk_engine_blocks_entry():
+                            return
+                        order_is_long, order_stop, order_target = self._entry_order_parameters(
+                            is_long=entry_plan.is_long,
+                            stop_price=entry_plan.stop_price,
+                            target_price=entry_plan.target_price,
+                        )
+                        self._tac_direction = 1 if order_is_long else -1
                         self._tac_module = entry_plan.module
                         self._tp1_done = entry_plan.tp1_done
                         self._tp2_done = entry_plan.tp2_done
@@ -1805,16 +2280,26 @@ class DualLayerStrategy(BaseRiskStrategy):
                         self._short_peak_r = entry_plan.short_peak_r
                         self._short_giveback_peak_r = entry_plan.short_giveback_peak_r
                         self._tac_entry_price = entry_plan.entry_price
-                        self._tac_sl = entry_plan.stop_price
-                        self._tac_tp = entry_plan.target_price
+                        self._tac_sl = order_stop
+                        self._tac_tp = order_target
                         self._tac_size = entry_plan.size
                         self._tac_entry_bar = entry_plan.entry_bar
                         self._tac_extreme = entry_plan.extreme
                         self._last_trade_bar = entry_plan.last_trade_bar
-                        if entry_plan.is_long:
-                            self._enter_long(self._tac_size, tag=entry_plan.order_tag, sl=sl, tp=tp)
+                        if order_is_long:
+                            self._enter_long(
+                                self._tac_size,
+                                tag=entry_plan.order_tag,
+                                sl=order_stop,
+                                tp=order_target,
+                            )
                         else:
-                            self._enter_short(self._tac_size, tag=entry_plan.order_tag, sl=sl, tp=tp)
+                            self._enter_short(
+                                self._tac_size,
+                                tag=entry_plan.order_tag,
+                                sl=order_stop,
+                                tp=order_target,
+                            )
 
 
 class WeightedSignalStrategy(Strategy):
@@ -1823,30 +2308,178 @@ class WeightedSignalStrategy(Strategy):
 
     def init(self):
         self.last_trade_bar = -10**9
+        self._last_platform_risk_decision = None
+        self._last_platform_risk_engine_decision = None
+        self._last_platform_pipeline_result = None
+        self._last_platform_entry_order = None
+        self._platform_pipeline_results = []
+        self._last_platform_risk_audit = None
+        self._platform_risk_audits = []
+
+    def _bar_index(self) -> int:
+        return len(self.data.Close) - 1
+
+    def _record_legacy_entry_risk_decision(
+        self,
+        *,
+        signal: Signal,
+        entry_price: float,
+        size_fraction: float,
+        stop_price: float | None,
+        target_price: float | None,
+    ):
+        return BaseRiskStrategy._record_legacy_entry_risk_decision(
+            self,
+            signal=signal,
+            entry_price=entry_price,
+            size_fraction=size_fraction,
+            stop_price=stop_price,
+            target_price=target_price,
+        )
+
+    def _platform_open_entry_order(self, pipeline_result):
+        return BaseRiskStrategy._platform_open_entry_order(self, pipeline_result)
+
+    def _entry_order_parameters(
+        self,
+        *,
+        is_long: bool,
+        stop_price: float | None,
+        target_price: float | None,
+    ) -> tuple[bool, float | None, float | None]:
+        return BaseRiskStrategy._entry_order_parameters(
+            self,
+            is_long=is_long,
+            stop_price=stop_price,
+            target_price=target_price,
+        )
+
+    def _platform_risk_engine_blocks_entry(self) -> bool:
+        return BaseRiskStrategy._platform_risk_engine_blocks_entry(self)
+
+    def _record_opposite_close_pipeline(
+        self,
+        *,
+        signal: Signal,
+        entry_price: float,
+    ):
+        position = getattr(self, "position", None)
+        if position is None:
+            return None
+        size_fraction = abs(float(getattr(position, "size", self.trade_size_fraction)))
+        decision = build_btc_legacy_entry_risk_decision(
+            signal=signal,
+            equity=self.equity,
+            entry_price=entry_price,
+            size_fraction=size_fraction,
+            stop_price=signal.preferred_stop,
+            target_price=signal.preferred_target,
+            reason="legacy_compat_close_audit",
+        )
+        quantity = decision.quantity
+        notional = decision.notional
+        existing_direction = Direction.LONG if position.is_long else Direction.SHORT
+        layer = _BTC_PLATFORM_LAYER_BY_MODULE["legacy_weighted"]
+        state = PortfolioState(positions={
+            PositionKey(signal.symbol, layer): Position(
+                symbol=signal.symbol,
+                layer=layer,
+                direction=existing_direction,
+                quantity=quantity,
+                notional=notional,
+                risk_amount=decision.risk_amount,
+                module=signal.module,
+                entry_price=entry_price,
+                stop_price=signal.preferred_stop,
+                target_price=signal.preferred_target,
+            )
+        })
+        self._last_platform_pipeline_result = SignalPipeline(
+            signal_runner=SignalModuleRunner([]),
+            risk_engine=RiskEngine(RiskLimits()),
+            portfolio_engine=PortfolioEngine(
+                state=state,
+                layer_by_module=_BTC_PLATFORM_LAYER_BY_MODULE,
+                close_on_opposite_signal=True,
+            ),
+        ).run_decisions(
+            [decision],
+            account=AccountState(equity=float(self.equity)),
+            bar_index=self._bar_index(),
+        )
+        if not hasattr(self, "_platform_pipeline_results"):
+            self._platform_pipeline_results = []
+        self._platform_pipeline_results.append(self._last_platform_pipeline_result)
+        return self._last_platform_pipeline_result
+
+    def _place_weighted_order(
+        self,
+        *,
+        is_long: bool,
+        size: float,
+        stop_price: float | None,
+        target_price: float | None,
+    ):
+        kwargs = {"size": size}
+        if stop_price is not None:
+            kwargs["sl"] = stop_price
+        if target_price is not None:
+            kwargs["tp"] = target_price
+        if is_long:
+            self.buy(**kwargs)
+        else:
+            self.sell(**kwargs)
 
     def next(self):
         i = len(self.data.Close) - 1
         if i - self.last_trade_bar < self.cooldown_bars:
             return
 
-        long_entry = bool(self.data.df["long_entry"].iloc[i])
-        short_entry = bool(self.data.df["short_entry"].iloc[i])
+        row = self.data.df.iloc[i]
+        entry_signal = select_btc_weighted_legacy_signal(row, symbol="BTC/USDT")
+        long_entry = entry_signal is not None and entry_signal.direction == Direction.LONG
+        short_entry = entry_signal is not None and entry_signal.direction == Direction.SHORT
 
         if self.position:
             if self.position.is_long and short_entry:
+                self._record_opposite_close_pipeline(
+                    signal=entry_signal,
+                    entry_price=float(row["Close"]),
+                )
                 self.position.close()
                 self.last_trade_bar = i
             elif self.position.is_short and long_entry:
+                self._record_opposite_close_pipeline(
+                    signal=entry_signal,
+                    entry_price=float(row["Close"]),
+                )
                 self.position.close()
                 self.last_trade_bar = i
             return
 
-        if long_entry:
-            self.buy(size=self.trade_size_fraction)
-            self.last_trade_bar = i
-        elif short_entry:
-            self.sell(size=self.trade_size_fraction)
-            self.last_trade_bar = i
+        if entry_signal is None:
+            return
+        self._record_legacy_entry_risk_decision(
+            signal=entry_signal,
+            entry_price=float(row["Close"]),
+            size_fraction=self.trade_size_fraction,
+            stop_price=entry_signal.preferred_stop,
+            target_price=entry_signal.preferred_target,
+        )
+        if self._platform_risk_engine_blocks_entry():
+            return
+        order_is_long, order_stop, order_target = self._entry_order_parameters(
+            is_long=long_entry,
+            stop_price=entry_signal.preferred_stop,
+            target_price=entry_signal.preferred_target,
+        )
+        self._place_weighted_order(
+            is_long=order_is_long,
+            size=self.trade_size_fraction,
+            stop_price=order_stop,
+            target_price=order_target,
+        )
+        self.last_trade_bar = i
 
 
 # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?Runner 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
