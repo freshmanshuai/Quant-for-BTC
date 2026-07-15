@@ -271,6 +271,19 @@ class FeatureEngineTest(unittest.TestCase):
         self.assertLessEqual(float(result["_atr_pct_4"].iloc[-1]), 1)
         self.assertNotIn("roll_high_5", bars.columns)
 
+    def test_volume_feature_module_derives_turnover_features_when_available(self):
+        from quant_platform.features import VolumeConfig, VolumeFeatureModule
+
+        bars = sample_bars().assign(Turnover=lambda frame: frame["Close"] * frame["Volume"])
+
+        result = VolumeFeatureModule(VolumeConfig(lookback=5)).apply(bars)
+
+        self.assertIn("turnover_sma_5", result.columns)
+        self.assertIn("turnover_std_5", result.columns)
+        self.assertIn("turnover_zscore_5", result.columns)
+        self.assertAlmostEqual(float(result["turnover_sma_5"].iloc[-1]), float(bars["Turnover"].tail(5).mean()))
+        self.assertNotIn("turnover_sma_5", bars.columns)
+
     def test_volatility_feature_module_can_use_distinct_atr_and_adx_periods(self):
         from quant_platform.features import VolatilityConfig, VolatilityFeatureModule
 

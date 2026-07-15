@@ -28,6 +28,8 @@ class RiskLimits:
     max_symbol_risk: float | None = None
     max_module_risk: float | None = None
     max_correlation_group_risk: float | None = None
+    max_exchange_risk: float | None = None
+    max_market_type_risk: float | None = None
     correlation_groups: dict[str, str] = field(default_factory=dict)
     max_drawdown_pct: float | None = None
     daily_drawdown_limit: float = 0.075
@@ -96,6 +98,8 @@ class RiskBudgetDiagnostics:
     pause_until_bar: int
     applied_size_multiplier: float
     drawdown: dict[str, float | bool | None]
+    exchanges: dict[str, RiskBudgetUsage] = field(default_factory=dict)
+    market_types: dict[str, RiskBudgetUsage] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -105,6 +109,8 @@ class RiskBudgetDiagnostics:
             "correlation_groups": {
                 key: usage.to_dict() for key, usage in self.correlation_groups.items()
             },
+            "exchanges": {key: usage.to_dict() for key, usage in self.exchanges.items()},
+            "market_types": {key: usage.to_dict() for key, usage in self.market_types.items()},
             "target_risk_amount": self.target_risk_amount,
             "consecutive_losses": self.consecutive_losses,
             "paused": self.paused,
@@ -173,6 +179,8 @@ class RiskEngine:
         open_symbol_risk: dict[str, float] | None = None,
         open_module_risk: dict[str, float] | None = None,
         open_group_risk: dict[str, float] | None = None,
+        open_exchange_risk: dict[str, float] | None = None,
+        open_market_type_risk: dict[str, float] | None = None,
     ) -> RiskDecision:
         if signal.direction == Direction.FLAT:
             return self._blocked(signal, "flat_signal", entry_price=entry_price)
@@ -241,6 +249,30 @@ class RiskEngine:
                     stop_price=stop_price,
                 )
 
+        exchange = market.exchange if market is not None else None
+        if exchange and self.limits.max_exchange_risk is not None:
+            exchange_budget = account.equity * self.limits.max_exchange_risk
+            current_exchange_risk = float((open_exchange_risk or {}).get(exchange, 0.0))
+            if current_exchange_risk + risk_amount > exchange_budget:
+                return self._blocked(
+                    signal,
+                    "exchange_risk_budget_exhausted",
+                    entry_price=entry,
+                    stop_price=stop_price,
+                )
+
+        market_type = market.market_type if market is not None else None
+        if market_type and self.limits.max_market_type_risk is not None:
+            market_type_budget = account.equity * self.limits.max_market_type_risk
+            current_market_type_risk = float((open_market_type_risk or {}).get(market_type, 0.0))
+            if current_market_type_risk + risk_amount > market_type_budget:
+                return self._blocked(
+                    signal,
+                    "market_type_risk_budget_exhausted",
+                    entry_price=entry,
+                    stop_price=stop_price,
+                )
+
         return RiskDecision(
             allowed=True,
             reason="allowed",
@@ -263,6 +295,8 @@ class RiskEngine:
         open_symbol_risk: dict[str, float] | None = None,
         open_module_risk: dict[str, float] | None = None,
         open_group_risk: dict[str, float] | None = None,
+        open_exchange_risk: dict[str, float] | None = None,
+        open_market_type_risk: dict[str, float] | None = None,
     ) -> RiskBudgetDiagnostics:
         multiplier = self.state.size_multiplier(self.limits)
         return RiskBudgetDiagnostics(
@@ -277,6 +311,8 @@ class RiskEngine:
                 self.limits.max_correlation_group_risk,
                 account,
             ),
+            exchanges=self._usage_by_key(open_exchange_risk or {}, self.limits.max_exchange_risk, account),
+            market_types=self._usage_by_key(open_market_type_risk or {}, self.limits.max_market_type_risk, account),
             target_risk_amount=account.equity * self.limits.risk_per_trade * multiplier,
             consecutive_losses=self.state.consecutive_losses,
             paused=self.state.is_paused(bar_index),

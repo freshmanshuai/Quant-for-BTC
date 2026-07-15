@@ -56,6 +56,7 @@ def _build_csv_connector(record: dict[str, Any], root: Path) -> LocalCsvConnecto
     return LocalCsvConnector(
         files_by_symbol={symbol: _resolve_path(path, root) for symbol, path in files.items()},
         timestamp_column=str(record.get("timestamp_column", "timestamp")),
+        column_map=dict(record.get("column_map") or {}),
     )
 
 
@@ -68,6 +69,7 @@ def _build_sqlite_connector(record: dict[str, Any], root: Path) -> SQLiteBarConn
         tables_by_symbol=dict(record.get("tables_by_symbol") or {}),
         timestamp_column=str(record.get("timestamp_column", "timestamp")),
         timeframe_column=str(record.get("timeframe_column", "timeframe")),
+        column_map=dict(record.get("column_map") or {}),
     )
 
 

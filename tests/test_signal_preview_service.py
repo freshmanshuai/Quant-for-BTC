@@ -493,6 +493,71 @@ class SignalPreviewServiceTest(unittest.TestCase):
         self.assertEqual(payload["orderCount"], 1)
         self.assertEqual(payload["orders"][0]["reason"], "risk_blocked:short_not_supported")
 
+    def test_generic_research_preview_applies_configured_market_type_risk_limit(self):
+        from serve import signal_preview
+        from quant_platform.risk import RiskLimits
+
+        bars = pd.DataFrame(
+            {
+                "Open": [198.0],
+                "High": [202.0],
+                "Low": [197.0],
+                "Close": [200.0],
+                "Volume": [1000.0],
+            },
+            index=pd.date_range("2026-06-03", periods=1, freq="1D", tz="UTC"),
+        )
+        market_records = [{
+            "symbol": "AAPL",
+            "base": "AAPL",
+            "quote": "USD",
+            "exchange": "nasdaq",
+            "market_type": "equity",
+            "tick_size": 0.01,
+            "lot_size": 0.001,
+            "supports_short": True,
+            "supports_leverage": False,
+        }]
+
+        def generate_signals(features, symbol, market, regime_profile):
+            return [
+                Signal(
+                    module="research_long",
+                    symbol=symbol,
+                    direction=Direction.LONG,
+                    score=75.0,
+                    entry_reason="research setup",
+                    invalidation="close below stop",
+                    preferred_stop=190.0,
+                    preferred_target=220.0,
+                    confidence=0.75,
+                )
+            ]
+
+        with TemporaryDirectory() as tmpdir:
+            market_path = Path(tmpdir) / "markets.json"
+            market_path.write_text(json.dumps({"markets": market_records}), encoding="utf-8")
+            original_market_path = signal_preview._MARKET_CATALOG_PATH
+            try:
+                signal_preview._MARKET_CATALOG_PATH = market_path
+                payload = signal_preview.get_signal_research_preview(
+                    timeframe="1d",
+                    symbol="AAPL",
+                    exchange="nasdaq",
+                    market_type="equity",
+                    equity=10_000.0,
+                    load_ohlcv=lambda timeframe, market: bars,
+                    build_features=lambda frame, market, regime_profile: frame,
+                    generate_signals=generate_signals,
+                    risk_limits=RiskLimits(max_market_type_risk=0.01),
+                )
+            finally:
+                signal_preview._MARKET_CATALOG_PATH = original_market_path
+
+        self.assertEqual(payload["riskDecisionCount"], 1)
+        self.assertFalse(payload["riskDecisions"][0]["allowed"])
+        self.assertEqual(payload["riskDecisions"][0]["reason"], "market_type_risk_budget_exhausted")
+
     def test_generic_research_preview_defaults_to_cached_feature_engine_output(self):
         from serve import signal_preview
 
@@ -529,12 +594,21 @@ class SignalPreviewServiceTest(unittest.TestCase):
 
         class FakeStore:
             def __init__(self, root):
-                calls["store_root"] = Path(root)
+                calls["parquet_store_root"] = Path(root)
 
             def write(self, series_id, features):
                 calls["series_id"] = series_id
                 calls["features"] = features.copy()
-                return calls["store_root"] / "feature_engine" / "nasdaq" / "equity" / "AAPL" / "1d" / "research_default_v1_ema50_atr14_adx14_bb20x2.parquet"
+                return calls["parquet_store_root"] / "feature_engine" / "nasdaq" / "equity" / "AAPL" / "1d" / "research_default_v1_ema50_atr14_adx14_bb20x2.parquet"
+
+        class FakeSQLiteStore:
+            def __init__(self, root):
+                calls["sqlite_store_root"] = Path(root)
+
+            def write(self, series_id, features):
+                calls["series_id"] = series_id
+                calls["features"] = features.copy()
+                return calls["sqlite_store_root"] / "feature_engine" / "nasdaq" / "equity" / "AAPL" / "1d" / "research_default_v1_ema50_atr14_adx14_bb20x2.sqlite"
 
         observed = {}
 
@@ -546,17 +620,23 @@ class SignalPreviewServiceTest(unittest.TestCase):
             root = Path(tmpdir)
             market_path = root / "markets.json"
             regime_path = root / "regime_profiles.json"
+            data_source_path = root / "research_data_sources.json"
             market_path.write_text(json.dumps({"markets": market_records}), encoding="utf-8")
             regime_path.write_text(json.dumps(regime_payload), encoding="utf-8")
+            data_source_path.write_text(json.dumps({"feature_store_type": "sqlite"}), encoding="utf-8")
             original_market_path = signal_preview._MARKET_CATALOG_PATH
             original_regime_path = signal_preview._REGIME_PROFILE_PATH
+            original_data_source_path = signal_preview._RESEARCH_DATA_SOURCE_PATH
             original_root = signal_preview._PROJECT_ROOT
             original_store = signal_preview.ParquetFeatureStore
+            original_sqlite_store = signal_preview.SQLiteFeatureStore
             try:
                 signal_preview._MARKET_CATALOG_PATH = market_path
                 signal_preview._REGIME_PROFILE_PATH = regime_path
+                signal_preview._RESEARCH_DATA_SOURCE_PATH = data_source_path
                 signal_preview._PROJECT_ROOT = root
                 signal_preview.ParquetFeatureStore = FakeStore
+                signal_preview.SQLiteFeatureStore = FakeSQLiteStore
                 payload = signal_preview.get_signal_research_preview(
                     timeframe="1d",
                     symbol="AAPL",
@@ -569,15 +649,88 @@ class SignalPreviewServiceTest(unittest.TestCase):
             finally:
                 signal_preview._MARKET_CATALOG_PATH = original_market_path
                 signal_preview._REGIME_PROFILE_PATH = original_regime_path
+                signal_preview._RESEARCH_DATA_SOURCE_PATH = original_data_source_path
                 signal_preview._PROJECT_ROOT = original_root
                 signal_preview.ParquetFeatureStore = original_store
+                signal_preview.SQLiteFeatureStore = original_sqlite_store
 
         self.assertEqual(payload["rows"], 5)
         self.assertEqual(calls["series_id"].cache_key, "feature_engine/nasdaq/equity/AAPL/1d/research_default_v1_ema50_atr14_adx14_bb20x2")
-        self.assertEqual(calls["store_root"], root / "data" / "research_features")
+        self.assertNotIn("parquet_store_root", calls)
+        self.assertEqual(calls["sqlite_store_root"], root / "data" / "research_features")
+        self.assertTrue(payload["featureCache"]["path"].endswith(".sqlite"))
         self.assertIn("ema50", calls["features"].columns)
         self.assertIn("donchian_high_20", calls["features"].columns)
         self.assertIn("ema50", observed["columns"])
+
+    def test_default_research_feature_builder_uses_configured_feature_modules(self):
+        from quant_platform.core import AssetSpec, MarketSpec
+        from quant_platform.regimes import RegimeProfile
+        from serve import signal_preview
+
+        bars = pd.DataFrame(
+            {
+                "Open": [99.0, 100.0, 101.0, 102.0, 103.0],
+                "High": [101.0, 102.0, 103.0, 104.0, 105.0],
+                "Low": [98.0, 99.0, 100.0, 101.0, 102.0],
+                "Close": [100.0, 101.0, 102.0, 103.0, 104.0],
+                "Volume": [1000.0, 1100.0, 1050.0, 1200.0, 1300.0],
+            },
+            index=pd.date_range("2026-06-01", periods=5, freq="D", tz="UTC"),
+        )
+        market = MarketSpec(
+            asset=AssetSpec(symbol="AAPL", base="AAPL", quote="USD"),
+            exchange="nasdaq",
+            market_type="equity",
+        )
+        feature_module_payload = {
+            "default_module_set": "research_default",
+            "module_sets": [{
+                "name": "research_default",
+                "modules": [
+                    {
+                        "type": "technical_indicators",
+                        "params": {"ema_lengths": ["$regime.trend_ema_length"]},
+                    },
+                    {"type": "donchian", "params": {"channel_periods": {"fast": 3}}},
+                    {"type": "price_action"},
+                ],
+            }],
+        }
+
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            feature_module_path = root / "research_feature_modules.json"
+            feature_module_path.write_text(json.dumps(feature_module_payload), encoding="utf-8")
+            original_feature_module_path = getattr(signal_preview, "_RESEARCH_FEATURE_MODULE_PATH", None)
+            original_store = signal_preview.ParquetFeatureStore
+
+            class FakeStore:
+                def __init__(self, root):
+                    pass
+
+                def write(self, series_id, features):
+                    return root / "features.parquet"
+
+            try:
+                signal_preview._RESEARCH_FEATURE_MODULE_PATH = feature_module_path
+                signal_preview.ParquetFeatureStore = FakeStore
+                features = signal_preview._default_research_feature_builder(
+                    bars,
+                    market,
+                    RegimeProfile(trend_ema_length=50),
+                    timeframe="1d",
+                )
+            finally:
+                if original_feature_module_path is None:
+                    delattr(signal_preview, "_RESEARCH_FEATURE_MODULE_PATH")
+                else:
+                    signal_preview._RESEARCH_FEATURE_MODULE_PATH = original_feature_module_path
+                signal_preview.ParquetFeatureStore = original_store
+
+        self.assertIn("ema50", features.columns)
+        self.assertIn("fast_high_3", features.columns)
+        self.assertNotIn("donchian_high_20", features.columns)
 
     def test_default_research_feature_cache_key_includes_profile_feature_parameters(self):
         from quant_platform.core import AssetSpec, MarketSpec
@@ -630,6 +783,60 @@ class SignalPreviewServiceTest(unittest.TestCase):
 
         self.assertEqual(cache_keys[0], "feature_engine/nasdaq/equity/AAPL/1d/research_default_v1_ema50_atr14_adx14_bb20x2")
         self.assertEqual(cache_keys[1], "feature_engine/nasdaq/equity/AAPL/1d/research_default_v1_ema169_atr14_adx14_bb20x2")
+        self.assertNotEqual(cache_keys[0], cache_keys[1])
+
+    def test_default_research_feature_cache_key_includes_turnover_schema(self):
+        from quant_platform.core import AssetSpec, MarketSpec
+        from quant_platform.regimes import RegimeProfile
+        from serve import signal_preview
+
+        bars = pd.DataFrame(
+            {
+                "Open": [99.0, 100.0],
+                "High": [101.0, 102.0],
+                "Low": [98.0, 99.0],
+                "Close": [100.0, 101.0],
+                "Volume": [1000.0, 1100.0],
+            },
+            index=pd.date_range("2026-06-01", periods=2, freq="D", tz="UTC"),
+        )
+        turnover_bars = bars.assign(Turnover=bars["Close"] * bars["Volume"])
+        market = MarketSpec(
+            asset=AssetSpec(symbol="AAPL", base="AAPL", quote="USD"),
+            exchange="nasdaq",
+            market_type="equity",
+        )
+        cache_keys = []
+
+        class FeatureResult:
+            def __init__(self, features):
+                self.features = features
+                self.cache = {"hit": False}
+
+        def fake_run_feature_engine_with_cache(engine, frame, *, series_id, store=None, refresh=False):
+            cache_keys.append(series_id.cache_key)
+            return FeatureResult(frame)
+
+        original_run = signal_preview.run_feature_engine_with_cache
+        try:
+            signal_preview.run_feature_engine_with_cache = fake_run_feature_engine_with_cache
+            signal_preview._default_research_feature_builder(
+                bars,
+                market,
+                RegimeProfile(trend_ema_length=50),
+                timeframe="1d",
+            )
+            signal_preview._default_research_feature_builder(
+                turnover_bars,
+                market,
+                RegimeProfile(trend_ema_length=50),
+                timeframe="1d",
+            )
+        finally:
+            signal_preview.run_feature_engine_with_cache = original_run
+
+        self.assertEqual(cache_keys[0], "feature_engine/nasdaq/equity/AAPL/1d/research_default_v1_ema50_atr14_adx14_bb20x2")
+        self.assertEqual(cache_keys[1], "feature_engine/nasdaq/equity/AAPL/1d/research_default_v1_ema50_atr14_adx14_bb20x2_turnover")
         self.assertNotEqual(cache_keys[0], cache_keys[1])
 
     def test_default_research_feature_builder_uses_profile_volatility_and_bollinger_parameters(self):
@@ -946,6 +1153,97 @@ class SignalPreviewServiceTest(unittest.TestCase):
         self.assertEqual(payload["exposureCurve"][1]["positionCount"], 1)
         self.assertEqual(payload["latestBar"]["close"], 115.0)
 
+    def test_generic_research_event_backtest_preview_exposes_open_order_ages(self):
+        from quant_platform.backtest import BacktestExecutionConfig
+        from serve import signal_preview
+
+        bars = pd.DataFrame(
+            {
+                "Open": [99.0, 100.0, 104.0, 104.0],
+                "High": [101.0, 104.0, 104.0, 104.0],
+                "Low": [98.0, 103.0, 103.0, 103.0],
+                "Close": [100.0, 105.0, 104.0, 104.0],
+                "Volume": [1000.0, 1200.0, 1400.0, 1600.0],
+            },
+            index=pd.date_range("2026-06-03", periods=4, freq="1D", tz="UTC"),
+        )
+        market_records = [{
+            "symbol": "AAPL",
+            "base": "AAPL",
+            "quote": "USD",
+            "exchange": "nasdaq",
+            "market_type": "equity",
+            "tick_size": 0.01,
+            "lot_size": 0.001,
+            "trading_session": "US_REGULAR",
+            "supports_short": False,
+            "supports_leverage": False,
+        }]
+        regime_payload = {
+            "default": {"trend_ema_length": 169},
+            "profiles": [{"exchange": "nasdaq", "market_type": "equity", "trend_ema_length": 50}],
+        }
+
+        def generate_signals(features, symbol, market, regime_profile):
+            if len(features) != 2:
+                return []
+            close = float(features["Close"].iloc[-1])
+            return [
+                Signal(
+                    module="research_breakout",
+                    symbol=symbol,
+                    direction=Direction.LONG,
+                    score=80.0,
+                    entry_reason="research breakout",
+                    invalidation="close below stop",
+                    preferred_stop=close - 5.0,
+                    preferred_target=close + 10.0,
+                    confidence=0.8,
+                )
+            ]
+
+        with TemporaryDirectory() as tmpdir:
+            market_path = Path(tmpdir) / "markets.json"
+            regime_path = Path(tmpdir) / "regime_profiles.json"
+            market_path.write_text(json.dumps({"markets": market_records}), encoding="utf-8")
+            regime_path.write_text(json.dumps(regime_payload), encoding="utf-8")
+            original_market_path = signal_preview._MARKET_CATALOG_PATH
+            original_regime_path = signal_preview._REGIME_PROFILE_PATH
+            try:
+                signal_preview._MARKET_CATALOG_PATH = market_path
+                signal_preview._REGIME_PROFILE_PATH = regime_path
+                payload = signal_preview.get_signal_research_event_backtest_preview(
+                    timeframe="1d",
+                    symbol="AAPL",
+                    exchange="nasdaq",
+                    market_type="equity",
+                    equity=10_000.0,
+                    load_ohlcv=lambda timeframe, market: bars,
+                    build_features=lambda frame, market, regime_profile: frame,
+                    generate_signals=generate_signals,
+                    execution=BacktestExecutionConfig(intrabar_entry_limit=True),
+                )
+            finally:
+                signal_preview._MARKET_CATALOG_PATH = original_market_path
+                signal_preview._REGIME_PROFILE_PATH = original_regime_path
+
+        self.assertEqual(payload["filledOrderCount"], 0)
+        self.assertEqual(payload["terminalOrderCount"], 0)
+        self.assertEqual(payload["orderStatusCounts"]["submitted"], 1)
+        self.assertEqual(payload["orderLifecycleSummary"]["totalOrderCount"], 1)
+        self.assertEqual(payload["orderLifecycleSummary"]["openCount"], 1)
+        self.assertEqual(payload["orderLifecycleSummary"]["resolvedCount"], 0)
+        self.assertAlmostEqual(payload["orderLifecycleSummary"]["openRate"], 1.0)
+        self.assertAlmostEqual(payload["orderLifecycleSummary"]["fillRate"], 0.0)
+        self.assertEqual(payload["openOrderAgeSummary"]["openCount"], 1)
+        self.assertEqual(payload["openOrderAgeSummary"]["submittedCount"], 1)
+        self.assertAlmostEqual(payload["openOrderAgeSummary"]["averageAgeBars"], 2.0)
+        self.assertEqual(payload["openOrderAgeSummary"]["maxAgeBars"], 2)
+        self.assertEqual(payload["openOrderAges"][0]["status"], "submitted")
+        self.assertEqual(payload["openOrderAges"][0]["ageBars"], 2)
+        self.assertEqual(payload["openOrderAges"][0]["submittedBarIndex"], 1)
+        self.assertEqual(payload["openOrderAges"][0]["currentBarIndex"], 3)
+
     def test_generic_research_event_backtest_preview_exposes_terminal_orders(self):
         from quant_platform.backtest import BacktestExecutionConfig
         from serve import signal_preview
@@ -1033,8 +1331,39 @@ class SignalPreviewServiceTest(unittest.TestCase):
         self.assertEqual(payload["orderModuleCounts"], {"research_breakout": 1})
         self.assertEqual(payload["orderSymbolCounts"], {"AAPL": 1})
         self.assertEqual(payload["orderLayerCounts"], {"tactical": 1})
+        self.assertEqual(payload["orderLatencySummary"]["resolvedCount"], 1)
+        self.assertAlmostEqual(payload["orderLatencySummary"]["averageWaitBars"], 2.0)
+        self.assertEqual(payload["orderLatencySummary"]["maxWaitBars"], 2)
+        self.assertEqual(payload["orderLatency"][0]["status"], "canceled")
+        self.assertEqual(payload["orderLatency"][0]["waitBars"], 2)
         self.assertEqual(payload["orderStatusCounts"]["canceled"], 1)
         self.assertEqual(payload["orderStatusCounts"]["submitted"], 0)
+        self.assertEqual(payload["orderLifecycleSummary"]["totalOrderCount"], 1)
+        self.assertEqual(payload["orderLifecycleSummary"]["terminalCount"], 1)
+        self.assertEqual(payload["orderLifecycleSummary"]["canceledCount"], 1)
+        self.assertAlmostEqual(payload["orderLifecycleSummary"]["terminalRate"], 1.0)
+        self.assertEqual(payload["orderLifecycleByAction"]["open"]["totalOrderCount"], 1)
+        self.assertEqual(payload["orderLifecycleByAction"]["open"]["terminalCount"], 1)
+        self.assertEqual(payload["orderLifecycleByAction"]["open"]["canceledCount"], 1)
+        self.assertAlmostEqual(payload["orderLifecycleByAction"]["open"]["terminalRate"], 1.0)
+        self.assertEqual(payload["orderLifecycleByAction"]["close"]["totalOrderCount"], 0)
+        self.assertAlmostEqual(payload["orderLifecycleByAction"]["close"]["fillRate"], 0.0)
+        self.assertEqual(payload["orderLifecycleByModule"]["research_breakout"]["totalOrderCount"], 1)
+        self.assertEqual(payload["orderLifecycleByModule"]["research_breakout"]["terminalCount"], 1)
+        self.assertEqual(payload["orderLifecycleByModule"]["research_breakout"]["canceledCount"], 1)
+        self.assertAlmostEqual(payload["orderLifecycleByModule"]["research_breakout"]["terminalRate"], 1.0)
+        self.assertEqual(payload["orderLifecycleBySymbol"]["AAPL"]["totalOrderCount"], 1)
+        self.assertEqual(payload["orderLifecycleBySymbol"]["AAPL"]["terminalCount"], 1)
+        self.assertEqual(payload["orderLifecycleBySymbol"]["AAPL"]["canceledCount"], 1)
+        self.assertAlmostEqual(payload["orderLifecycleBySymbol"]["AAPL"]["terminalRate"], 1.0)
+        self.assertEqual(payload["orderLifecycleByLayer"]["tactical"]["totalOrderCount"], 1)
+        self.assertEqual(payload["orderLifecycleByLayer"]["tactical"]["terminalCount"], 1)
+        self.assertEqual(payload["orderLifecycleByLayer"]["tactical"]["canceledCount"], 1)
+        self.assertAlmostEqual(payload["orderLifecycleByLayer"]["tactical"]["terminalRate"], 1.0)
+        self.assertEqual(payload["orderLifecycleByDirection"]["long"]["totalOrderCount"], 1)
+        self.assertEqual(payload["orderLifecycleByDirection"]["long"]["terminalCount"], 1)
+        self.assertEqual(payload["orderLifecycleByDirection"]["long"]["canceledCount"], 1)
+        self.assertAlmostEqual(payload["orderLifecycleByDirection"]["long"]["terminalRate"], 1.0)
         self.assertEqual(payload["tradeCount"], 0)
         self.assertEqual(payload["exposureCurve"][-1]["positionCount"], 0)
 
@@ -1311,6 +1640,15 @@ class SignalPreviewServiceTest(unittest.TestCase):
         self.assertEqual(payload["markets"]["AAPL"]["marketType"], "equity")
         self.assertEqual(payload["orderStatusCounts"]["filled"], 2)
         self.assertEqual(payload["orderStatusCounts"]["submitted"], 0)
+        self.assertEqual(payload["orderLifecycleByCorrelationGroup"]["mega_cap"]["totalOrderCount"], 2)
+        self.assertEqual(payload["orderLifecycleByCorrelationGroup"]["mega_cap"]["filledCount"], 2)
+        self.assertAlmostEqual(payload["orderLifecycleByCorrelationGroup"]["mega_cap"]["fillRate"], 1.0)
+        self.assertEqual(payload["orderLifecycleByExchange"]["nasdaq"]["totalOrderCount"], 2)
+        self.assertEqual(payload["orderLifecycleByExchange"]["nasdaq"]["filledCount"], 2)
+        self.assertAlmostEqual(payload["orderLifecycleByExchange"]["nasdaq"]["fillRate"], 1.0)
+        self.assertEqual(payload["orderLifecycleByMarketType"]["equity"]["totalOrderCount"], 2)
+        self.assertEqual(payload["orderLifecycleByMarketType"]["equity"]["filledCount"], 2)
+        self.assertAlmostEqual(payload["orderLifecycleByMarketType"]["equity"]["fillRate"], 1.0)
         self.assertEqual(payload["regimeProfiles"]["MSFT"]["trendEmaLength"], 50)
         self.assertIn("AAPL", payload["latestRegimes"])
         self.assertIn("MSFT", payload["latestRegimes"])
@@ -1326,6 +1664,8 @@ class SignalPreviewServiceTest(unittest.TestCase):
         symbol_exposure = two_position_exposure["symbolExposure"]
         layer_exposure = two_position_exposure["layerExposure"]
         module_exposure = two_position_exposure["moduleExposure"]
+        exchange_exposure = two_position_exposure["exchangeExposure"]
+        market_type_exposure = two_position_exposure["marketTypeExposure"]
         self.assertEqual(mega_cap_exposure["positionCount"], 2)
         self.assertAlmostEqual(mega_cap_exposure["openRisk"], two_position_exposure["openRisk"])
         self.assertEqual(symbol_exposure["AAPL"]["positionCount"], 1)
@@ -1336,6 +1676,10 @@ class SignalPreviewServiceTest(unittest.TestCase):
         self.assertAlmostEqual(layer_exposure["tactical"]["openRisk"], two_position_exposure["openRisk"])
         self.assertEqual(module_exposure["research_breakout"]["positionCount"], 2)
         self.assertAlmostEqual(module_exposure["research_breakout"]["openRisk"], two_position_exposure["openRisk"])
+        self.assertEqual(exchange_exposure["nasdaq"]["positionCount"], 2)
+        self.assertAlmostEqual(exchange_exposure["nasdaq"]["openRisk"], two_position_exposure["openRisk"])
+        self.assertEqual(market_type_exposure["equity"]["positionCount"], 2)
+        self.assertAlmostEqual(market_type_exposure["equity"]["openRisk"], two_position_exposure["openRisk"])
         self.assertEqual(payload["exposureSummary"]["maxPositionCount"], 2)
         self.assertGreater(payload["exposureSummary"]["maxGrossNotional"], 0.0)
         self.assertAlmostEqual(
@@ -1344,6 +1688,18 @@ class SignalPreviewServiceTest(unittest.TestCase):
         )
         self.assertEqual(payload["exposureSummary"]["maxGroupGrossNotionalGroup"], "mega_cap")
         self.assertEqual(payload["exposureSummary"]["maxGroupOpenRiskGroup"], "mega_cap")
+        self.assertAlmostEqual(
+            payload["exposureSummary"]["maxExchangeOpenRisk"],
+            two_position_exposure["openRisk"],
+        )
+        self.assertEqual(payload["exposureSummary"]["maxExchangeGrossNotionalExchange"], "nasdaq")
+        self.assertEqual(payload["exposureSummary"]["maxExchangeOpenRiskExchange"], "nasdaq")
+        self.assertAlmostEqual(
+            payload["exposureSummary"]["maxMarketTypeOpenRisk"],
+            two_position_exposure["openRisk"],
+        )
+        self.assertEqual(payload["exposureSummary"]["maxMarketTypeGrossNotionalMarketType"], "equity")
+        self.assertEqual(payload["exposureSummary"]["maxMarketTypeOpenRiskMarketType"], "equity")
         self.assertIn(
             payload["exposureSummary"]["maxSymbolGrossNotionalSymbol"],
             {"AAPL", "MSFT"},
@@ -1359,6 +1715,9 @@ class SignalPreviewServiceTest(unittest.TestCase):
         self.assertEqual(payload["exposureCurve"][-1]["positionCount"], 0)
         self.assertIn("AAPL", payload["attribution"]["bySymbol"])
         self.assertIn("MSFT", payload["attribution"]["bySymbol"])
+        self.assertEqual(payload["attribution"]["byExchange"]["nasdaq"]["tradeCount"], 2)
+        self.assertEqual(payload["attribution"]["byMarketType"]["equity"]["tradeCount"], 2)
+        self.assertEqual(payload["attribution"]["byCorrelationGroup"]["mega_cap"]["tradeCount"], 2)
 
     def test_research_preview_bars_load_from_configured_non_btc_csv_source(self):
         from serve import signal_preview
@@ -1468,7 +1827,11 @@ class SignalPreviewServiceTest(unittest.TestCase):
 
         class FakeBarStore:
             def __init__(self, root):
-                calls["store_root"] = Path(root)
+                calls["parquet_store_root"] = Path(root)
+
+        class FakeSQLiteBarStore:
+            def __init__(self, root):
+                calls["sqlite_store_root"] = Path(root)
 
         def fake_fetch_bars_with_cache(**kwargs):
             calls.update(kwargs)
@@ -1494,6 +1857,7 @@ class SignalPreviewServiceTest(unittest.TestCase):
                         "market_type": "equity",
                         "timeframe": "1d",
                         "source": "research_csv",
+                        "store_type": "sqlite",
                         "limit": 1,
                     }
                 ],
@@ -1504,12 +1868,14 @@ class SignalPreviewServiceTest(unittest.TestCase):
             original_root = signal_preview._PROJECT_ROOT
             original_fetch = signal_preview.fetch_bars_with_cache
             original_store = signal_preview.ParquetBarStore
+            original_sqlite_store = signal_preview.SQLiteBarStore
             try:
                 signal_preview._MARKET_CATALOG_PATH = market_path
                 signal_preview._RESEARCH_DATA_SOURCE_PATH = data_source_path
                 signal_preview._PROJECT_ROOT = root
                 signal_preview.fetch_bars_with_cache = fake_fetch_bars_with_cache
                 signal_preview.ParquetBarStore = FakeBarStore
+                signal_preview.SQLiteBarStore = FakeSQLiteBarStore
                 market = signal_preview.resolve_market_spec("AAPL", exchange="nasdaq", market_type="equity")
                 bars = signal_preview.load_research_preview_bars("1d", market)
             finally:
@@ -1518,6 +1884,7 @@ class SignalPreviewServiceTest(unittest.TestCase):
                 signal_preview._PROJECT_ROOT = original_root
                 signal_preview.fetch_bars_with_cache = original_fetch
                 signal_preview.ParquetBarStore = original_store
+                signal_preview.SQLiteBarStore = original_sqlite_store
 
         self.assertIs(bars, expected)
         self.assertEqual(calls["source"], "research_csv")
@@ -1525,7 +1892,8 @@ class SignalPreviewServiceTest(unittest.TestCase):
         self.assertEqual(calls["timeframe"], "1d")
         self.assertEqual(calls["limit"], 1)
         self.assertFalse(calls["refresh"])
-        self.assertEqual(calls["store_root"], root / "data" / "research_bars")
+        self.assertNotIn("parquet_store_root", calls)
+        self.assertEqual(calls["sqlite_store_root"], root / "data" / "research_bars")
 
     def test_research_preview_bars_filter_intraday_rows_to_market_session(self):
         from serve import signal_preview
@@ -1617,6 +1985,173 @@ class SignalPreviewServiceTest(unittest.TestCase):
 
         self.assertEqual(list(bars.index), [pd.Timestamp("2026-06-12T14:00:00Z")])
         self.assertEqual(float(bars.iloc[0]["Close"]), 202.0)
+
+    def test_research_preview_bars_pass_configured_date_window_to_cache_boundary(self):
+        from serve import signal_preview
+
+        expected = pd.DataFrame(
+            {
+                "Open": [202.0],
+                "High": [206.0],
+                "Low": [201.0],
+                "Close": [205.0],
+                "Volume": [1200.0],
+            },
+            index=pd.date_range("2026-06-02", periods=1, freq="D", tz="UTC"),
+        )
+        market_records = [{
+            "symbol": "AAPL",
+            "base": "AAPL",
+            "quote": "USD",
+            "exchange": "nasdaq",
+            "market_type": "equity",
+            "tick_size": 0.01,
+            "lot_size": 0.001,
+            "supports_short": False,
+            "supports_leverage": False,
+        }]
+        calls = {}
+
+        class FakeBarStore:
+            def __init__(self, root):
+                calls["store_root"] = Path(root)
+
+        def fake_fetch_bars_with_cache(**kwargs):
+            calls.update(kwargs)
+            return expected
+
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            market_path = root / "markets.json"
+            data_source_path = root / "research_data_sources.json"
+            market_path.write_text(json.dumps({"markets": market_records}), encoding="utf-8")
+            data_source_path.write_text(json.dumps({
+                "connectors": [
+                    {
+                        "name": "research_csv",
+                        "type": "csv",
+                        "files_by_symbol": {"AAPL": "data/aapl_1d.csv"},
+                    }
+                ],
+                "routes": [
+                    {
+                        "symbol": "AAPL",
+                        "exchange": "nasdaq",
+                        "market_type": "equity",
+                        "timeframe": "1d",
+                        "source": "research_csv",
+                        "start": "2026-06-01T00:00:00Z",
+                        "end": "2026-06-30T00:00:00Z",
+                    }
+                ],
+            }), encoding="utf-8")
+
+            original_market_path = signal_preview._MARKET_CATALOG_PATH
+            original_data_source_path = signal_preview._RESEARCH_DATA_SOURCE_PATH
+            original_root = signal_preview._PROJECT_ROOT
+            original_fetch = signal_preview.fetch_bars_with_cache
+            original_store = signal_preview.ParquetBarStore
+            try:
+                signal_preview._MARKET_CATALOG_PATH = market_path
+                signal_preview._RESEARCH_DATA_SOURCE_PATH = data_source_path
+                signal_preview._PROJECT_ROOT = root
+                signal_preview.fetch_bars_with_cache = fake_fetch_bars_with_cache
+                signal_preview.ParquetBarStore = FakeBarStore
+                market = signal_preview.resolve_market_spec("AAPL", exchange="nasdaq", market_type="equity")
+                bars = signal_preview.load_research_preview_bars("1d", market)
+            finally:
+                signal_preview._MARKET_CATALOG_PATH = original_market_path
+                signal_preview._RESEARCH_DATA_SOURCE_PATH = original_data_source_path
+                signal_preview._PROJECT_ROOT = original_root
+                signal_preview.fetch_bars_with_cache = original_fetch
+                signal_preview.ParquetBarStore = original_store
+
+        self.assertIs(bars, expected)
+        self.assertEqual(calls["start"], pd.Timestamp("2026-06-01T00:00:00Z"))
+        self.assertEqual(calls["end"], pd.Timestamp("2026-06-30T00:00:00Z"))
+
+    def test_research_preview_bars_treat_naive_configured_date_window_as_utc(self):
+        from serve import signal_preview
+
+        expected = pd.DataFrame(
+            {
+                "Open": [202.0],
+                "High": [206.0],
+                "Low": [201.0],
+                "Close": [205.0],
+                "Volume": [1200.0],
+            },
+            index=pd.date_range("2026-06-02", periods=1, freq="D", tz="UTC"),
+        )
+        market_records = [{
+            "symbol": "AAPL",
+            "base": "AAPL",
+            "quote": "USD",
+            "exchange": "nasdaq",
+            "market_type": "equity",
+            "tick_size": 0.01,
+            "lot_size": 0.001,
+            "supports_short": False,
+            "supports_leverage": False,
+        }]
+        calls = {}
+
+        class FakeBarStore:
+            def __init__(self, root):
+                pass
+
+        def fake_fetch_bars_with_cache(**kwargs):
+            calls.update(kwargs)
+            return expected
+
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            market_path = root / "markets.json"
+            data_source_path = root / "research_data_sources.json"
+            market_path.write_text(json.dumps({"markets": market_records}), encoding="utf-8")
+            data_source_path.write_text(json.dumps({
+                "connectors": [
+                    {
+                        "name": "research_csv",
+                        "type": "csv",
+                        "files_by_symbol": {"AAPL": "data/aapl_1d.csv"},
+                    }
+                ],
+                "routes": [
+                    {
+                        "symbol": "AAPL",
+                        "exchange": "nasdaq",
+                        "market_type": "equity",
+                        "timeframe": "1d",
+                        "source": "research_csv",
+                        "start": "2026-06-01",
+                        "end": "2026-06-30",
+                    }
+                ],
+            }), encoding="utf-8")
+
+            original_market_path = signal_preview._MARKET_CATALOG_PATH
+            original_data_source_path = signal_preview._RESEARCH_DATA_SOURCE_PATH
+            original_root = signal_preview._PROJECT_ROOT
+            original_fetch = signal_preview.fetch_bars_with_cache
+            original_store = signal_preview.ParquetBarStore
+            try:
+                signal_preview._MARKET_CATALOG_PATH = market_path
+                signal_preview._RESEARCH_DATA_SOURCE_PATH = data_source_path
+                signal_preview._PROJECT_ROOT = root
+                signal_preview.fetch_bars_with_cache = fake_fetch_bars_with_cache
+                signal_preview.ParquetBarStore = FakeBarStore
+                market = signal_preview.resolve_market_spec("AAPL", exchange="nasdaq", market_type="equity")
+                signal_preview.load_research_preview_bars("1d", market)
+            finally:
+                signal_preview._MARKET_CATALOG_PATH = original_market_path
+                signal_preview._RESEARCH_DATA_SOURCE_PATH = original_data_source_path
+                signal_preview._PROJECT_ROOT = original_root
+                signal_preview.fetch_bars_with_cache = original_fetch
+                signal_preview.ParquetBarStore = original_store
+
+        self.assertEqual(calls["start"], pd.Timestamp("2026-06-01T00:00:00Z"))
+        self.assertEqual(calls["end"], pd.Timestamp("2026-06-30T00:00:00Z"))
 
     def test_research_preview_bars_can_refresh_generic_bar_store_cache_boundary(self):
         from serve import signal_preview
@@ -1745,7 +2280,11 @@ class SignalPreviewServiceTest(unittest.TestCase):
 
         class FakeDerivativeStore:
             def __init__(self, root):
-                calls["derivative_store_root"] = Path(root)
+                calls["parquet_derivative_store_root"] = Path(root)
+
+        class FakeSQLiteDerivativeStore:
+            def __init__(self, root):
+                calls["sqlite_derivative_store_root"] = Path(root)
 
         def fake_fetch_derivatives_with_cache(**kwargs):
             calls["derivative_kwargs"] = kwargs
@@ -1769,9 +2308,12 @@ class SignalPreviewServiceTest(unittest.TestCase):
                         "timeframe": "1h",
                         "source": "exchange_ccxt",
                         "data_type": "derivatives",
+                        "store_type": "sqlite",
                         "funding_limit": 500,
                         "open_interest_timeframe": "4h",
                         "open_interest_limit": 600,
+                        "start": "2026-06-01T00:00:00Z",
+                        "end": "2026-06-01T02:00:00Z",
                     }
                 ],
             }), encoding="utf-8")
@@ -1780,12 +2322,14 @@ class SignalPreviewServiceTest(unittest.TestCase):
             original_data_source_path = signal_preview._RESEARCH_DATA_SOURCE_PATH
             original_feature_store = signal_preview.ParquetFeatureStore
             original_derivative_store = signal_preview.ParquetDerivativeStore
+            original_sqlite_derivative_store = signal_preview.SQLiteDerivativeStore
             original_fetch_derivatives = signal_preview.fetch_derivatives_with_cache
             try:
                 signal_preview._PROJECT_ROOT = root
                 signal_preview._RESEARCH_DATA_SOURCE_PATH = data_source_path
                 signal_preview.ParquetFeatureStore = FakeFeatureStore
                 signal_preview.ParquetDerivativeStore = FakeDerivativeStore
+                signal_preview.SQLiteDerivativeStore = FakeSQLiteDerivativeStore
                 signal_preview.fetch_derivatives_with_cache = fake_fetch_derivatives_with_cache
                 features = signal_preview._default_research_feature_builder(
                     bars,
@@ -1799,6 +2343,7 @@ class SignalPreviewServiceTest(unittest.TestCase):
                 signal_preview._RESEARCH_DATA_SOURCE_PATH = original_data_source_path
                 signal_preview.ParquetFeatureStore = original_feature_store
                 signal_preview.ParquetDerivativeStore = original_derivative_store
+                signal_preview.SQLiteDerivativeStore = original_sqlite_derivative_store
                 signal_preview.fetch_derivatives_with_cache = original_fetch_derivatives
 
         self.assertEqual(float(features.iloc[-1]["funding_rate"]), 0.0002)
@@ -1810,8 +2355,11 @@ class SignalPreviewServiceTest(unittest.TestCase):
         self.assertEqual(calls["derivative_kwargs"]["funding_limit"], 500)
         self.assertEqual(calls["derivative_kwargs"]["open_interest_timeframe"], "4h")
         self.assertEqual(calls["derivative_kwargs"]["open_interest_limit"], 600)
+        self.assertEqual(calls["derivative_kwargs"]["start"], pd.Timestamp("2026-06-01T00:00:00Z"))
+        self.assertEqual(calls["derivative_kwargs"]["end"], pd.Timestamp("2026-06-01T02:00:00Z"))
         self.assertTrue(calls["derivative_kwargs"]["refresh"])
-        self.assertEqual(calls["derivative_store_root"], root / "data" / "research_derivatives")
+        self.assertNotIn("parquet_derivative_store_root", calls)
+        self.assertEqual(calls["sqlite_derivative_store_root"], root / "data" / "research_derivatives")
         self.assertEqual(calls["feature_store_root"], root / "data" / "research_features")
         self.assertTrue(calls["feature_series_id"].feature_set.endswith("_derivatives"))
 
@@ -1866,7 +2414,11 @@ class SignalPreviewServiceTest(unittest.TestCase):
 
         class FakeOrderBookStore:
             def __init__(self, root):
-                calls["order_book_store_root"] = Path(root)
+                calls["parquet_order_book_store_root"] = Path(root)
+
+        class FakeSQLiteOrderBookStore:
+            def __init__(self, root):
+                calls["sqlite_order_book_store_root"] = Path(root)
 
         def fake_fetch_order_book_snapshots_with_cache(**kwargs):
             calls["order_book_kwargs"] = kwargs
@@ -1890,6 +2442,7 @@ class SignalPreviewServiceTest(unittest.TestCase):
                         "timeframe": "1h",
                         "source": "exchange_ccxt",
                         "data_type": "order_book",
+                        "store_type": "sqlite",
                         "depth": 2,
                         "sample_interval": "snapshot",
                         "limit": 7,
@@ -1901,12 +2454,14 @@ class SignalPreviewServiceTest(unittest.TestCase):
             original_data_source_path = signal_preview._RESEARCH_DATA_SOURCE_PATH
             original_feature_store = signal_preview.ParquetFeatureStore
             original_order_book_store = signal_preview.ParquetOrderBookStore
+            original_sqlite_order_book_store = signal_preview.SQLiteOrderBookStore
             original_fetch_order_book = signal_preview.fetch_order_book_snapshots_with_cache
             try:
                 signal_preview._PROJECT_ROOT = root
                 signal_preview._RESEARCH_DATA_SOURCE_PATH = data_source_path
                 signal_preview.ParquetFeatureStore = FakeFeatureStore
                 signal_preview.ParquetOrderBookStore = FakeOrderBookStore
+                signal_preview.SQLiteOrderBookStore = FakeSQLiteOrderBookStore
                 signal_preview.fetch_order_book_snapshots_with_cache = fake_fetch_order_book_snapshots_with_cache
                 features = signal_preview._default_research_feature_builder(
                     bars,
@@ -1920,6 +2475,7 @@ class SignalPreviewServiceTest(unittest.TestCase):
                 signal_preview._RESEARCH_DATA_SOURCE_PATH = original_data_source_path
                 signal_preview.ParquetFeatureStore = original_feature_store
                 signal_preview.ParquetOrderBookStore = original_order_book_store
+                signal_preview.SQLiteOrderBookStore = original_sqlite_order_book_store
                 signal_preview.fetch_order_book_snapshots_with_cache = original_fetch_order_book
 
         self.assertEqual(float(features.iloc[-1]["order_book_spread"]), 1.0)
@@ -1933,9 +2489,160 @@ class SignalPreviewServiceTest(unittest.TestCase):
         self.assertEqual(calls["order_book_kwargs"]["sample_interval"], "snapshot")
         self.assertEqual(calls["order_book_kwargs"]["limit"], 7)
         self.assertTrue(calls["order_book_kwargs"]["refresh"])
-        self.assertEqual(calls["order_book_store_root"], root / "data" / "research_order_books")
+        self.assertNotIn("parquet_order_book_store_root", calls)
+        self.assertEqual(calls["sqlite_order_book_store_root"], root / "data" / "research_order_books")
         self.assertEqual(calls["feature_store_root"], root / "data" / "research_features")
         self.assertTrue(calls["feature_series_id"].feature_set.endswith("_order_book_d2"))
+
+    def test_default_research_feature_builder_loads_configured_external_metric_features(self):
+        from quant_platform.core import AssetSpec, MarketSpec
+        from quant_platform.regimes import RegimeProfile
+        from serve import signal_preview
+
+        bars = pd.DataFrame(
+            {
+                "Open": [100.0, 101.0, 102.0],
+                "High": [102.0, 103.0, 104.0],
+                "Low": [99.0, 100.0, 101.0],
+                "Close": [101.0, 102.0, 103.0],
+                "Volume": [1000.0, 1100.0, 1200.0],
+            },
+            index=pd.to_datetime(
+                ["2026-06-01T00:00:00Z", "2026-06-01T01:00:00Z", "2026-06-01T02:00:00Z"],
+                utc=True,
+            ),
+        )
+        metrics = pd.DataFrame(
+            {
+                "bullish_ratio": [0.45, 0.62, 0.99],
+                "risk_score": [12.0, 35.0, 99.0],
+            },
+            index=pd.to_datetime(
+                ["2026-06-01T00:00:00Z", "2026-06-01T02:00:00Z", "2026-06-01T03:00:00Z"],
+                utc=True,
+            ),
+        )
+        macro_metrics = pd.DataFrame(
+            {"liquidity": [1.5, 1.8]},
+            index=pd.to_datetime(["2026-06-01T00:00:00Z", "2026-06-01T01:00:00Z"], utc=True),
+        )
+        market = MarketSpec(
+            asset=AssetSpec(symbol="ETH/USDT", base="ETH", quote="USDT"),
+            exchange="binance",
+            market_type="swap",
+            supports_short=True,
+            supports_leverage=True,
+        )
+        calls = {}
+
+        class FakeFeatureStore:
+            def __init__(self, root):
+                calls["feature_store_root"] = Path(root)
+
+            def write(self, series_id, features):
+                calls["feature_series_id"] = series_id
+                calls["feature_columns"] = list(features.columns)
+                return Path("features.parquet")
+
+        class FakeExternalMetricStore:
+            def __init__(self, root):
+                calls["parquet_external_metric_store_root"] = Path(root)
+
+            def read(self, series_id):
+                calls.setdefault("parquet_external_metric_series_ids", []).append(series_id)
+                return metrics
+
+        class FakeSQLiteExternalMetricStore:
+            def __init__(self, root):
+                calls["sqlite_external_metric_store_root"] = Path(root)
+
+            def read(self, series_id):
+                calls.setdefault("sqlite_external_metric_series_ids", []).append(series_id)
+                return macro_metrics
+
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            data_source_path = root / "research_data_sources.json"
+            data_source_path.write_text(json.dumps({
+                "routes": [
+                    {
+                        "symbol": "ETH/USDT",
+                        "exchange": "binance",
+                        "market_type": "swap",
+                        "timeframe": "1h",
+                        "source": "valuescan_store",
+                        "data_type": "external_metrics",
+                        "provider": "valuescan",
+                        "dataset": "ai_tracking",
+                        "prefix": "valuescan",
+                        "columns": ["bullish_ratio", "risk_score"],
+                        "start": "2026-06-01T00:00:00Z",
+                        "end": "2026-06-01T01:00:00Z",
+                    },
+                    {
+                        "symbol": "ETH/USDT",
+                        "exchange": "binance",
+                        "market_type": "swap",
+                        "timeframe": "1h",
+                        "source": "macro_store",
+                        "data_type": "external_metrics",
+                        "store_type": "sqlite",
+                        "provider": "macro",
+                        "dataset": "liquidity",
+                        "prefix": "macro",
+                        "columns": ["liquidity"],
+                    }
+                ],
+            }), encoding="utf-8")
+
+            original_root = signal_preview._PROJECT_ROOT
+            original_data_source_path = signal_preview._RESEARCH_DATA_SOURCE_PATH
+            original_feature_store = signal_preview.ParquetFeatureStore
+            original_external_store = signal_preview.ParquetExternalMetricStore
+            original_sqlite_external_store = signal_preview.SQLiteExternalMetricStore
+            try:
+                signal_preview._PROJECT_ROOT = root
+                signal_preview._RESEARCH_DATA_SOURCE_PATH = data_source_path
+                signal_preview.ParquetFeatureStore = FakeFeatureStore
+                signal_preview.ParquetExternalMetricStore = FakeExternalMetricStore
+                signal_preview.SQLiteExternalMetricStore = FakeSQLiteExternalMetricStore
+                features = signal_preview._default_research_feature_builder(
+                    bars,
+                    market,
+                    RegimeProfile(trend_ema_length=3),
+                    timeframe="1h",
+                    refresh=True,
+                )
+            finally:
+                signal_preview._PROJECT_ROOT = original_root
+                signal_preview._RESEARCH_DATA_SOURCE_PATH = original_data_source_path
+                signal_preview.ParquetFeatureStore = original_feature_store
+                signal_preview.ParquetExternalMetricStore = original_external_store
+                signal_preview.SQLiteExternalMetricStore = original_sqlite_external_store
+
+        self.assertEqual(float(features.iloc[-1]["valuescan_bullish_ratio"]), 0.45)
+        self.assertEqual(float(features.iloc[-1]["valuescan_risk_score"]), 12.0)
+        self.assertEqual(float(features.iloc[-1]["macro_liquidity"]), 1.8)
+        self.assertEqual(calls["parquet_external_metric_store_root"], root / "data" / "research_external_metrics")
+        self.assertEqual(calls["sqlite_external_metric_store_root"], root / "data" / "research_external_metrics")
+        self.assertEqual(
+            [series_id.cache_key for series_id in calls["parquet_external_metric_series_ids"]],
+            [
+                "valuescan_store/valuescan/ETH_USDT/1h/ai_tracking",
+            ],
+        )
+        self.assertEqual(
+            [series_id.cache_key for series_id in calls["sqlite_external_metric_series_ids"]],
+            [
+                "macro_store/macro/ETH_USDT/1h/liquidity",
+            ],
+        )
+        self.assertEqual(calls["feature_store_root"], root / "data" / "research_features")
+        self.assertIn("valuescan_bullish_ratio", calls["feature_columns"])
+        self.assertIn("macro_liquidity", calls["feature_columns"])
+        self.assertTrue(
+            calls["feature_series_id"].feature_set.endswith("_external_valuescan_ai_tracking_macro_liquidity")
+        )
 
     def test_default_research_feature_builder_falls_back_when_derivatives_are_unavailable(self):
         from quant_platform.core import AssetSpec, MarketSpec
@@ -2514,6 +3221,26 @@ class SignalPreviewServiceTest(unittest.TestCase):
         self.assertAlmostEqual(payload["summary"]["finalUnrealizedPnl"], 0.0)
         self.assertAlmostEqual(payload["summary"]["maxDrawdownPct"], 0.0)
         self.assertAlmostEqual(payload["summary"]["maxDrawdownAmount"], 0.0)
+        self.assertIsNone(payload["summary"]["returnToMaxDrawdown"])
+        self.assertEqual(payload["summary"]["maxDrawdownDurationBars"], 0)
+        self.assertEqual(payload["summary"]["drawdownPointCount"], 0)
+        self.assertEqual(payload["summary"]["timeInDrawdownPct"], 0.0)
+        self.assertEqual(payload["summary"]["eventReturnCount"], len(payload["equityCurve"]))
+        self.assertGreaterEqual(payload["summary"]["bestEventReturnPct"], 0.0)
+        self.assertLessEqual(payload["summary"]["worstEventReturnPct"], payload["summary"]["bestEventReturnPct"])
+        self.assertGreaterEqual(payload["summary"]["positiveEventReturnCount"], 0)
+        self.assertGreaterEqual(payload["summary"]["negativeEventReturnCount"], 0)
+        self.assertGreaterEqual(payload["summary"]["eventReturnWinRate"], 0.0)
+        self.assertGreaterEqual(payload["summary"]["maxConsecutivePositiveEventReturns"], 0)
+        self.assertGreaterEqual(payload["summary"]["maxConsecutiveNegativeEventReturns"], 0)
+        self.assertGreaterEqual(payload["summary"]["averagePositiveEventReturnPct"], 0.0)
+        self.assertGreaterEqual(payload["summary"]["averageNegativeEventReturnPct"], 0.0)
+        self.assertIsNone(payload["summary"]["eventReturnPayoffRatio"])
+        self.assertIsNone(payload["summary"]["eventReturnProfitFactor"])
+        self.assertGreaterEqual(payload["summary"]["eventReturnVolatilityPct"], 0.0)
+        self.assertIn("eventReturnRiskRatio", payload["summary"])
+        self.assertEqual(payload["summary"]["eventReturnDownsideVolatilityPct"], 0.0)
+        self.assertIsNone(payload["summary"]["eventReturnSortinoRatio"])
         self.assertEqual(payload["summary"]["tradeCount"], 1)
         self.assertAlmostEqual(payload["summary"]["winRate"], 1.0)
         self.assertAlmostEqual(payload["summary"]["averageTradeNetPnl"], 400.0)
@@ -2524,8 +3251,11 @@ class SignalPreviewServiceTest(unittest.TestCase):
         self.assertAlmostEqual(payload["summary"]["averageWinNetPnl"], 400.0)
         self.assertIsNone(payload["summary"]["averageLossNetPnl"])
         self.assertIsNone(payload["summary"]["payoffRatio"])
+        self.assertAlmostEqual(payload["summary"]["realizedTradeNotional"], 8_800.0)
+        self.assertAlmostEqual(payload["summary"]["realizedTurnoverRatio"], 0.88)
         self.assertEqual(payload["attribution"]["bySymbol"]["BTC/USDT"]["tradeCount"], 1)
         self.assertAlmostEqual(payload["attribution"]["bySymbol"]["BTC/USDT"]["averageHoldingBars"], 2.0)
+        self.assertAlmostEqual(payload["attribution"]["bySymbol"]["BTC/USDT"]["realizedTradeNotional"], 8_800.0)
         self.assertAlmostEqual(payload["attribution"]["bySymbol"]["BTC/USDT"]["grossProfit"], 400.0)
         self.assertAlmostEqual(payload["attribution"]["bySymbol"]["BTC/USDT"]["grossLoss"], 0.0)
         self.assertIsNone(payload["attribution"]["bySymbol"]["BTC/USDT"]["profitFactor"])
@@ -2534,9 +3264,16 @@ class SignalPreviewServiceTest(unittest.TestCase):
         self.assertIsNone(payload["attribution"]["bySymbol"]["BTC/USDT"]["payoffRatio"])
         self.assertEqual(payload["attribution"]["byDirection"]["long"]["tradeCount"], 1)
         self.assertAlmostEqual(payload["attribution"]["byDirection"]["long"]["averageHoldingBars"], 2.0)
+        self.assertAlmostEqual(payload["attribution"]["byDirection"]["long"]["realizedTradeNotional"], 8_800.0)
         self.assertEqual(payload["attribution"]["byExitReason"]["target"]["tradeCount"], 1)
         self.assertAlmostEqual(payload["attribution"]["byExitReason"]["target"]["averageHoldingBars"], 2.0)
+        self.assertAlmostEqual(payload["attribution"]["byExitReason"]["target"]["realizedTradeNotional"], 8_800.0)
         self.assertEqual(payload["equityCurve"][-1]["equity"], 10_400.0)
+        self.assertEqual(payload["equityCurve"][-1]["equityPeak"], 10_400.0)
+        self.assertGreaterEqual(payload["equityCurve"][-1]["returnPct"], 0.0)
+        self.assertEqual(payload["equityCurve"][-1]["drawdownAmount"], 0.0)
+        self.assertEqual(payload["equityCurve"][-1]["drawdownPct"], 0.0)
+        self.assertEqual(payload["equityCurve"][-1]["drawdownDurationBars"], 0)
         self.assertEqual(len(payload["exposureCurve"]), 4)
         open_exposure = payload["exposureCurve"][1]
         self.assertEqual(open_exposure["symbol"], "BTC/USDT")

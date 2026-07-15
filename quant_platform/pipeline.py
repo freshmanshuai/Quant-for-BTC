@@ -41,6 +41,7 @@ class SignalPipeline:
         self.risk_engine = risk_engine
         self.portfolio_engine = portfolio_engine
         self.delivery_channels = list(delivery_channels)
+        self.markets_by_symbol = dict(markets_by_symbol or {})
         if markets_by_symbol is not None:
             self.risk_engine.markets_by_symbol = dict(markets_by_symbol)
             self.portfolio_engine.markets_by_symbol = dict(markets_by_symbol)
@@ -63,6 +64,8 @@ class SignalPipeline:
         open_group_risk = self.portfolio_engine.state.open_group_risk(
             group_resolver=self.risk_engine.correlation_group_for_symbol
         )
+        open_exchange_risk = self._open_market_attribute_risk("exchange")
+        open_market_type_risk = self._open_market_attribute_risk("market_type")
 
         for signal in signals:
             price = self._entry_price(features, signal.symbol, entry_price=entry_price, entry_prices=entry_prices)
@@ -75,6 +78,8 @@ class SignalPipeline:
                 open_symbol_risk=open_symbol_risk,
                 open_module_risk=open_module_risk,
                 open_group_risk=open_group_risk,
+                open_exchange_risk=open_exchange_risk,
+                open_market_type_risk=open_market_type_risk,
             )
             risk_decisions.append(decision)
             if decision.allowed:
@@ -84,6 +89,14 @@ class SignalPipeline:
                 group = self.risk_engine.correlation_group_for_symbol(signal.symbol)
                 if group:
                     open_group_risk[group] = open_group_risk.get(group, 0.0) + decision.risk_amount
+                exchange = self._market_attribute(signal.symbol, "exchange")
+                if exchange:
+                    open_exchange_risk[exchange] = open_exchange_risk.get(exchange, 0.0) + decision.risk_amount
+                market_type = self._market_attribute(signal.symbol, "market_type")
+                if market_type:
+                    open_market_type_risk[market_type] = (
+                        open_market_type_risk.get(market_type, 0.0) + decision.risk_amount
+                    )
 
         portfolio_plan = self.portfolio_engine.apply(risk_decisions)
         risk_diagnostics = self._risk_diagnostics(account, bar_index=bar_index)
@@ -125,7 +138,28 @@ class SignalPipeline:
             open_group_risk=self.portfolio_engine.state.open_group_risk(
                 group_resolver=self.risk_engine.correlation_group_for_symbol
             ),
+            open_exchange_risk=self._open_market_attribute_risk("exchange"),
+            open_market_type_risk=self._open_market_attribute_risk("market_type"),
         )
+
+    def _open_market_attribute_risk(self, attribute: str) -> dict[str, float]:
+        usage: dict[str, float] = {}
+        for position in self.portfolio_engine.state.positions.values():
+            value = self._market_attribute(position.symbol, attribute)
+            if not value:
+                continue
+            usage[value] = usage.get(value, 0.0) + position.risk_amount
+        return usage
+
+    def _market_attribute(self, symbol: str, attribute: str) -> str | None:
+        markets_by_symbol = (
+            self.portfolio_engine.markets_by_symbol
+            or self.markets_by_symbol
+            or self.risk_engine.markets_by_symbol
+        )
+        market = markets_by_symbol.get(symbol)
+        value = getattr(market, attribute, None) if market is not None else None
+        return str(value) if value else None
 
     def _deliver(self, portfolio_plan: PortfolioPlan) -> list[DeliveryResult]:
         delivery_results: list[DeliveryResult] = []

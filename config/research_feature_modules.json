@@ -1,0 +1,40 @@
+{
+  "default_module_set": "research_default",
+  "module_sets": [
+    {
+      "name": "research_default",
+      "modules": [
+        {
+          "type": "technical_indicators",
+          "params": {
+            "ema_lengths": ["$regime.trend_ema_length"]
+          }
+        },
+        {
+          "type": "donchian"
+        },
+        {
+          "type": "volume"
+        },
+        {
+          "type": "volatility",
+          "params": {
+            "period": "$regime.atr_period",
+            "adx_period": "$regime.adx_period",
+            "percentile_lookback": "$regime.regime_lookback"
+          }
+        },
+        {
+          "type": "bollinger",
+          "params": {
+            "period": "$regime.bb_period",
+            "std_mult": "$regime.bb_std_mult"
+          }
+        },
+        {
+          "type": "price_action"
+        }
+      ]
+    }
+  ]
+}

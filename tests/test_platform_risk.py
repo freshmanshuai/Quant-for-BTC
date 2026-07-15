@@ -238,6 +238,62 @@ class RiskEngineTest(unittest.TestCase):
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason, "correlation_group_risk_budget_exhausted")
 
+    def test_market_spec_exchange_feeds_risk_budget_gate(self):
+        from quant_platform.core import AssetSpec, MarketSpec
+        from quant_platform.risk import AccountState, RiskEngine, RiskLimits
+
+        market = MarketSpec(
+            asset=AssetSpec(symbol="BTC/USDT", base="BTC", quote="USDT"),
+            exchange="binance",
+            market_type="swap",
+        )
+        engine = RiskEngine(
+            RiskLimits(
+                risk_per_trade=0.02,
+                portfolio_risk_budget=0.20,
+                max_exchange_risk=0.05,
+            ),
+            markets_by_symbol={"BTC/USDT": market},
+        )
+
+        decision = engine.evaluate(
+            self._signal(symbol="BTC/USDT"),
+            AccountState(equity=10_000.0),
+            entry_price=100.0,
+            open_exchange_risk={"binance": 450.0},
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "exchange_risk_budget_exhausted")
+
+    def test_market_spec_market_type_feeds_risk_budget_gate(self):
+        from quant_platform.core import AssetSpec, MarketSpec
+        from quant_platform.risk import AccountState, RiskEngine, RiskLimits
+
+        market = MarketSpec(
+            asset=AssetSpec(symbol="BTC/USDT", base="BTC", quote="USDT"),
+            exchange="binance",
+            market_type="swap",
+        )
+        engine = RiskEngine(
+            RiskLimits(
+                risk_per_trade=0.02,
+                portfolio_risk_budget=0.20,
+                max_market_type_risk=0.05,
+            ),
+            markets_by_symbol={"BTC/USDT": market},
+        )
+
+        decision = engine.evaluate(
+            self._signal(symbol="BTC/USDT"),
+            AccountState(equity=10_000.0),
+            entry_price=100.0,
+            open_market_type_risk={"swap": 450.0},
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "market_type_risk_budget_exhausted")
+
     def test_unmapped_symbols_skip_correlation_group_gate(self):
         from quant_platform.risk import AccountState, RiskEngine, RiskLimits
 
@@ -302,6 +358,8 @@ class RiskEngineTest(unittest.TestCase):
             max_symbol_risk=0.05,
             max_module_risk=0.04,
             max_correlation_group_risk=0.06,
+            max_exchange_risk=0.07,
+            max_market_type_risk=0.08,
             correlation_groups={"BTC/USDT": "crypto_beta", "ETH/USDT": "crypto_beta"},
         ))
 
@@ -311,6 +369,8 @@ class RiskEngineTest(unittest.TestCase):
             open_symbol_risk={"BTC/USDT": 200.0, "ETH/USDT": 100.0},
             open_module_risk={"breakout": 200.0, "pullback": 100.0},
             open_group_risk={"crypto_beta": 300.0},
+            open_exchange_risk={"binance": 200.0, "okx": 100.0},
+            open_market_type_risk={"swap": 300.0},
         )
 
         self.assertEqual(diagnostics.portfolio.used, 300.0)
@@ -322,6 +382,13 @@ class RiskEngineTest(unittest.TestCase):
         self.assertEqual(diagnostics.modules["breakout"].budget, 400.0)
         self.assertEqual(diagnostics.correlation_groups["crypto_beta"].budget, 600.0)
         self.assertEqual(diagnostics.correlation_groups["crypto_beta"].utilization, 0.5)
+        self.assertEqual(diagnostics.exchanges["binance"].used, 200.0)
+        self.assertAlmostEqual(diagnostics.exchanges["binance"].budget, 700.0)
+        self.assertEqual(diagnostics.exchanges["okx"].used, 100.0)
+        self.assertEqual(diagnostics.market_types["swap"].used, 300.0)
+        self.assertEqual(diagnostics.market_types["swap"].budget, 800.0)
+        self.assertEqual(diagnostics.to_dict()["exchanges"]["okx"]["used"], 100.0)
+        self.assertEqual(diagnostics.to_dict()["market_types"]["swap"]["used"], 300.0)
         self.assertEqual(diagnostics.target_risk_amount, 200.0)
         self.assertFalse(diagnostics.paused)
 

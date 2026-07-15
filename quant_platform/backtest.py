@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field, replace
 from typing import Mapping
 
@@ -66,6 +67,11 @@ class BacktestEquityPoint:
     cash: float
     unrealized_pnl: float
     equity: float
+    return_pct: float = 0.0
+    equity_peak: float = 0.0
+    drawdown_amount: float = 0.0
+    drawdown_pct: float = 0.0
+    drawdown_duration_bars: int = 0
 
 
 @dataclass(frozen=True)
@@ -83,6 +89,27 @@ class BacktestPerformanceSummary:
     min_equity: float
     max_drawdown_amount: float
     max_drawdown_pct: float
+    return_to_max_drawdown: float | None = None
+    max_drawdown_duration_bars: int = 0
+    drawdown_point_count: int = 0
+    time_in_drawdown_pct: float = 0.0
+    event_return_count: int = 0
+    average_event_return_pct: float = 0.0
+    best_event_return_pct: float = 0.0
+    worst_event_return_pct: float = 0.0
+    positive_event_return_count: int = 0
+    negative_event_return_count: int = 0
+    event_return_win_rate: float = 0.0
+    max_consecutive_positive_event_returns: int = 0
+    max_consecutive_negative_event_returns: int = 0
+    average_positive_event_return_pct: float = 0.0
+    average_negative_event_return_pct: float = 0.0
+    event_return_payoff_ratio: float | None = None
+    event_return_profit_factor: float | None = None
+    event_return_volatility_pct: float = 0.0
+    event_return_risk_ratio: float | None = None
+    event_return_downside_volatility_pct: float = 0.0
+    event_return_sortino_ratio: float | None = None
     trade_count: int = 0
     win_rate: float = 0.0
     average_trade_net_pnl: float = 0.0
@@ -93,6 +120,8 @@ class BacktestPerformanceSummary:
     average_win_net_pnl: float | None = None
     average_loss_net_pnl: float | None = None
     payoff_ratio: float | None = None
+    realized_trade_notional: float = 0.0
+    realized_turnover_ratio: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -124,6 +153,8 @@ class BacktestExposurePoint:
     layer_exposure: dict[str, BacktestExposureBucket] = field(default_factory=dict)
     module_exposure: dict[str, BacktestExposureBucket] = field(default_factory=dict)
     group_exposure: dict[str, BacktestExposureBucket] = field(default_factory=dict)
+    exchange_exposure: dict[str, BacktestExposureBucket] = field(default_factory=dict)
+    market_type_exposure: dict[str, BacktestExposureBucket] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -142,6 +173,10 @@ class BacktestExposureSummary:
     max_module_open_risk: float
     max_group_gross_notional: float
     max_group_open_risk: float
+    max_exchange_gross_notional: float = 0.0
+    max_exchange_open_risk: float = 0.0
+    max_market_type_gross_notional: float = 0.0
+    max_market_type_open_risk: float = 0.0
     max_symbol_gross_notional_symbol: str | None = None
     max_symbol_open_risk_symbol: str | None = None
     max_layer_gross_notional_layer: str | None = None
@@ -150,6 +185,10 @@ class BacktestExposureSummary:
     max_module_open_risk_module: str | None = None
     max_group_gross_notional_group: str | None = None
     max_group_open_risk_group: str | None = None
+    max_exchange_gross_notional_exchange: str | None = None
+    max_exchange_open_risk_exchange: str | None = None
+    max_market_type_gross_notional_market_type: str | None = None
+    max_market_type_open_risk_market_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -184,6 +223,7 @@ class BacktestAttributionBucket:
     net_pnl: float
     fees_paid: float
     win_count: int
+    realized_trade_notional: float = 0.0
     average_holding_bars: float | None = None
     gross_profit: float = 0.0
     gross_loss: float = 0.0
@@ -206,6 +246,80 @@ class BacktestAttribution:
     by_module: dict[str, BacktestAttributionBucket]
     by_direction: dict[str, BacktestAttributionBucket]
     by_exit_reason: dict[str, BacktestAttributionBucket]
+    by_exchange: dict[str, BacktestAttributionBucket] = field(default_factory=dict)
+    by_market_type: dict[str, BacktestAttributionBucket] = field(default_factory=dict)
+    by_correlation_group: dict[str, BacktestAttributionBucket] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class BacktestOrderLatency:
+    """Bars an order waited between first submission and terminal resolution."""
+
+    order_id: str
+    action: OrderAction
+    status: OrderStatus
+    symbol: str
+    layer: str
+    module: str
+    submitted_bar_index: int
+    resolved_bar_index: int
+    wait_bars: int
+
+
+@dataclass(frozen=True)
+class BacktestOrderLatencySummary:
+    """Run-level order wait-time summary for resolved submitted orders."""
+
+    resolved_count: int
+    average_wait_bars: float | None
+    max_wait_bars: int | None
+    filled_count: int = 0
+    canceled_count: int = 0
+    rejected_count: int = 0
+
+
+@dataclass(frozen=True)
+class BacktestOpenOrderAge:
+    """Bars an unresolved submitted order has remained open by run end."""
+
+    order_id: str
+    action: OrderAction
+    status: OrderStatus
+    symbol: str
+    layer: str
+    module: str
+    submitted_bar_index: int
+    current_bar_index: int
+    age_bars: int
+
+
+@dataclass(frozen=True)
+class BacktestOpenOrderAgeSummary:
+    """Run-level age summary for unresolved submitted orders."""
+
+    open_count: int
+    average_age_bars: float | None
+    max_age_bars: int | None
+    submitted_count: int = 0
+    partially_filled_count: int = 0
+
+
+@dataclass(frozen=True)
+class BacktestOrderLifecycleSummary:
+    """Run-level order resolution mix for event-driven execution simulation."""
+
+    total_order_count: int
+    submitted_count: int
+    partially_filled_count: int
+    filled_count: int
+    canceled_count: int
+    rejected_count: int
+    resolved_count: int
+    open_count: int
+    terminal_count: int
+    fill_rate: float
+    open_rate: float
+    terminal_rate: float
 
 
 @dataclass(frozen=True)
@@ -220,6 +334,9 @@ class EventDrivenBacktestResult:
     exposure_curve: list[BacktestExposurePoint] = field(default_factory=list)
     trades: list[BacktestTrade] = field(default_factory=list)
     terminal_orders: list[PortfolioOrder] = field(default_factory=list)
+    order_latency: list[BacktestOrderLatency] = field(default_factory=list)
+    open_order_ages: list[BacktestOpenOrderAge] = field(default_factory=list)
+    markets_by_symbol: Mapping[str, MarketSpec] = field(default_factory=dict)
     realized_pnl: float = 0.0
     fees_paid: float = 0.0
     funding_paid: float = 0.0
@@ -307,6 +424,164 @@ class EventDrivenBacktestResult:
         return counts
 
     @property
+    def order_latency_summary(self) -> BacktestOrderLatencySummary:
+        if not self.order_latency:
+            return BacktestOrderLatencySummary(
+                resolved_count=0,
+                average_wait_bars=None,
+                max_wait_bars=None,
+            )
+        wait_bars = [item.wait_bars for item in self.order_latency]
+        return BacktestOrderLatencySummary(
+            resolved_count=len(self.order_latency),
+            average_wait_bars=sum(wait_bars) / len(wait_bars),
+            max_wait_bars=max(wait_bars),
+            filled_count=sum(item.status == OrderStatus.FILLED for item in self.order_latency),
+            canceled_count=sum(item.status == OrderStatus.CANCELED for item in self.order_latency),
+            rejected_count=sum(item.status == OrderStatus.REJECTED for item in self.order_latency),
+        )
+
+    @property
+    def open_order_age_summary(self) -> BacktestOpenOrderAgeSummary:
+        if not self.open_order_ages:
+            return BacktestOpenOrderAgeSummary(
+                open_count=0,
+                average_age_bars=None,
+                max_age_bars=None,
+            )
+        age_bars = [item.age_bars for item in self.open_order_ages]
+        return BacktestOpenOrderAgeSummary(
+            open_count=len(self.open_order_ages),
+            average_age_bars=sum(age_bars) / len(age_bars),
+            max_age_bars=max(age_bars),
+            submitted_count=sum(item.status == OrderStatus.SUBMITTED for item in self.open_order_ages),
+            partially_filled_count=sum(
+                item.status == OrderStatus.PARTIALLY_FILLED for item in self.open_order_ages
+            ),
+        )
+
+    @property
+    def order_lifecycle_summary(self) -> BacktestOrderLifecycleSummary:
+        return self._order_lifecycle_summary_for_orders(self._effective_orders())
+
+    @property
+    def order_lifecycle_by_action(self) -> dict[OrderAction, BacktestOrderLifecycleSummary]:
+        orders = self._effective_orders()
+        return {
+            action: self._order_lifecycle_summary_for_orders(
+                [order for order in orders if order.action == action]
+            )
+            for action in OrderAction
+        }
+
+    @property
+    def order_lifecycle_by_module(self) -> dict[str, BacktestOrderLifecycleSummary]:
+        groups: dict[str, list[PortfolioOrder]] = {}
+        for order in self._effective_orders():
+            module = self._order_module(order)
+            groups.setdefault(module, []).append(order)
+        return {
+            module: self._order_lifecycle_summary_for_orders(orders)
+            for module, orders in groups.items()
+        }
+
+    @property
+    def order_lifecycle_by_symbol(self) -> dict[str, BacktestOrderLifecycleSummary]:
+        groups: dict[str, list[PortfolioOrder]] = {}
+        for order in self._effective_orders():
+            groups.setdefault(order.symbol, []).append(order)
+        return {
+            symbol: self._order_lifecycle_summary_for_orders(orders)
+            for symbol, orders in groups.items()
+        }
+
+    @property
+    def order_lifecycle_by_layer(self) -> dict[str, BacktestOrderLifecycleSummary]:
+        groups: dict[str, list[PortfolioOrder]] = {}
+        for order in self._effective_orders():
+            groups.setdefault(order.layer, []).append(order)
+        return {
+            layer: self._order_lifecycle_summary_for_orders(orders)
+            for layer, orders in groups.items()
+        }
+
+    @property
+    def order_lifecycle_by_direction(self) -> dict[str, BacktestOrderLifecycleSummary]:
+        groups: dict[str, list[PortfolioOrder]] = {}
+        for order in self._effective_orders():
+            groups.setdefault(order.direction.value, []).append(order)
+        return {
+            direction: self._order_lifecycle_summary_for_orders(orders)
+            for direction, orders in groups.items()
+        }
+
+    @property
+    def order_lifecycle_by_correlation_group(self) -> dict[str, BacktestOrderLifecycleSummary]:
+        groups: dict[str, list[PortfolioOrder]] = {}
+        for order in self._effective_orders():
+            market = self.markets_by_symbol.get(order.symbol)
+            group = market.correlation_group if market is not None else None
+            if group:
+                groups.setdefault(group, []).append(order)
+        return {
+            group: self._order_lifecycle_summary_for_orders(orders)
+            for group, orders in groups.items()
+        }
+
+    @property
+    def order_lifecycle_by_exchange(self) -> dict[str, BacktestOrderLifecycleSummary]:
+        groups: dict[str, list[PortfolioOrder]] = {}
+        for order in self._effective_orders():
+            market = self.markets_by_symbol.get(order.symbol)
+            if market is not None and market.exchange:
+                groups.setdefault(market.exchange, []).append(order)
+        return {
+            exchange: self._order_lifecycle_summary_for_orders(orders)
+            for exchange, orders in groups.items()
+        }
+
+    @property
+    def order_lifecycle_by_market_type(self) -> dict[str, BacktestOrderLifecycleSummary]:
+        groups: dict[str, list[PortfolioOrder]] = {}
+        for order in self._effective_orders():
+            market = self.markets_by_symbol.get(order.symbol)
+            if market is not None and market.market_type:
+                groups.setdefault(market.market_type, []).append(order)
+        return {
+            market_type: self._order_lifecycle_summary_for_orders(orders)
+            for market_type, orders in groups.items()
+        }
+
+    @staticmethod
+    def _order_lifecycle_summary_for_orders(orders: list[PortfolioOrder]) -> BacktestOrderLifecycleSummary:
+        counts = {status: 0 for status in OrderStatus}
+        for order in orders:
+            counts[order.status] += 1
+        submitted_count = counts[OrderStatus.SUBMITTED]
+        partially_filled_count = counts[OrderStatus.PARTIALLY_FILLED]
+        filled_count = counts[OrderStatus.FILLED]
+        canceled_count = counts[OrderStatus.CANCELED]
+        rejected_count = counts[OrderStatus.REJECTED]
+        open_count = submitted_count + partially_filled_count
+        terminal_count = canceled_count + rejected_count
+        resolved_count = filled_count + terminal_count
+        total_order_count = sum(counts.values())
+        return BacktestOrderLifecycleSummary(
+            total_order_count=total_order_count,
+            submitted_count=submitted_count,
+            partially_filled_count=partially_filled_count,
+            filled_count=filled_count,
+            canceled_count=canceled_count,
+            rejected_count=rejected_count,
+            resolved_count=resolved_count,
+            open_count=open_count,
+            terminal_count=terminal_count,
+            fill_rate=filled_count / total_order_count if total_order_count else 0.0,
+            open_rate=open_count / total_order_count if total_order_count else 0.0,
+            terminal_rate=terminal_count / total_order_count if total_order_count else 0.0,
+        )
+
+    @property
     def attribution(self) -> BacktestAttribution:
         return BacktestAttribution(
             by_symbol=self._bucket_by(lambda trade: trade.symbol),
@@ -314,6 +589,9 @@ class EventDrivenBacktestResult:
             by_module=self._bucket_by(lambda trade: trade.module),
             by_direction=self._bucket_by(lambda trade: trade.direction.value),
             by_exit_reason=self._bucket_by(lambda trade: trade.exit_reason),
+            by_exchange=self._bucket_by_market_field(lambda market: market.exchange),
+            by_market_type=self._bucket_by_market_field(lambda market: market.market_type),
+            by_correlation_group=self._bucket_by_market_field(lambda market: market.correlation_group),
         )
 
     @property
@@ -343,6 +621,15 @@ class EventDrivenBacktestResult:
             if average_win_net_pnl is not None and average_loss_net_pnl
             else None
         )
+        realized_trade_notional = sum(
+            (abs(trade.entry_price) + abs(trade.exit_price)) * trade.quantity
+            for trade in self.trades
+        )
+        realized_turnover_ratio = (
+            realized_trade_notional / initial_equity
+            if initial_equity
+            else 0.0
+        )
         if not self.equity_curve:
             return BacktestPerformanceSummary(
                 initial_equity=initial_equity,
@@ -356,6 +643,27 @@ class EventDrivenBacktestResult:
                 min_equity=initial_equity,
                 max_drawdown_amount=0.0,
                 max_drawdown_pct=0.0,
+                return_to_max_drawdown=None,
+                max_drawdown_duration_bars=0,
+                drawdown_point_count=0,
+                time_in_drawdown_pct=0.0,
+                event_return_count=0,
+                average_event_return_pct=0.0,
+                best_event_return_pct=0.0,
+                worst_event_return_pct=0.0,
+                positive_event_return_count=0,
+                negative_event_return_count=0,
+                event_return_win_rate=0.0,
+                max_consecutive_positive_event_returns=0,
+                max_consecutive_negative_event_returns=0,
+                average_positive_event_return_pct=0.0,
+                average_negative_event_return_pct=0.0,
+                event_return_payoff_ratio=None,
+                event_return_profit_factor=None,
+                event_return_volatility_pct=0.0,
+                event_return_risk_ratio=None,
+                event_return_downside_volatility_pct=0.0,
+                event_return_sortino_ratio=None,
                 trade_count=trade_count,
                 win_rate=win_rate,
                 average_trade_net_pnl=average_trade_net_pnl,
@@ -366,25 +674,99 @@ class EventDrivenBacktestResult:
                 average_win_net_pnl=average_win_net_pnl,
                 average_loss_net_pnl=average_loss_net_pnl,
                 payoff_ratio=payoff_ratio,
+                realized_trade_notional=realized_trade_notional,
+                realized_turnover_ratio=realized_turnover_ratio,
             )
 
         equity_values = [initial_equity] + [float(point.equity) for point in self.equity_curve]
         peak = equity_values[0]
         max_drawdown_amount = 0.0
         max_drawdown_pct = 0.0
+        max_drawdown_duration_bars = 0
+        current_drawdown_duration_bars = 0
         for equity in equity_values:
-            peak = max(peak, equity)
+            if equity >= peak:
+                peak = equity
+                current_drawdown_duration_bars = 0
+            else:
+                current_drawdown_duration_bars += 1
             drawdown_amount = peak - equity
             drawdown_pct = drawdown_amount / peak if peak else 0.0
             if drawdown_amount > max_drawdown_amount:
                 max_drawdown_amount = drawdown_amount
                 max_drawdown_pct = drawdown_pct
+            max_drawdown_duration_bars = max(
+                max_drawdown_duration_bars,
+                current_drawdown_duration_bars,
+            )
+
+        event_peak = initial_equity
+        drawdown_point_count = 0
+        for point in self.equity_curve:
+            equity = float(point.equity)
+            if equity >= event_peak:
+                event_peak = equity
+            else:
+                drawdown_point_count += 1
+
+        event_returns = [
+            (current - previous) / previous if previous else 0.0
+            for previous, current in zip(equity_values, equity_values[1:])
+        ]
+        positive_event_return_count = sum(return_pct > 0 for return_pct in event_returns)
+        negative_event_return_count = sum(return_pct < 0 for return_pct in event_returns)
+        max_consecutive_positive_event_returns = 0
+        max_consecutive_negative_event_returns = 0
+        current_positive_event_returns = 0
+        current_negative_event_returns = 0
+        for return_pct in event_returns:
+            if return_pct > 0:
+                current_positive_event_returns += 1
+                current_negative_event_returns = 0
+            elif return_pct < 0:
+                current_negative_event_returns += 1
+                current_positive_event_returns = 0
+            else:
+                current_positive_event_returns = 0
+                current_negative_event_returns = 0
+            max_consecutive_positive_event_returns = max(
+                max_consecutive_positive_event_returns,
+                current_positive_event_returns,
+            )
+            max_consecutive_negative_event_returns = max(
+                max_consecutive_negative_event_returns,
+                current_negative_event_returns,
+            )
+        positive_event_returns = [return_pct for return_pct in event_returns if return_pct > 0]
+        negative_event_returns = [abs(return_pct) for return_pct in event_returns if return_pct < 0]
+        positive_event_return_sum = sum(positive_event_returns)
+        negative_event_return_sum = sum(negative_event_returns)
+        average_positive_event_return_pct = (
+            positive_event_return_sum / len(positive_event_returns)
+            if positive_event_returns
+            else 0.0
+        )
+        average_negative_event_return_pct = (
+            negative_event_return_sum / len(negative_event_returns)
+            if negative_event_returns
+            else 0.0
+        )
+        average_event_return_pct = sum(event_returns) / len(event_returns)
+        event_return_volatility_pct = math.sqrt(
+            sum((return_pct - average_event_return_pct) ** 2 for return_pct in event_returns)
+            / len(event_returns)
+        )
+        event_return_downside_volatility_pct = math.sqrt(
+            sum((min(return_pct, 0.0)) ** 2 for return_pct in event_returns)
+            / len(event_returns)
+        )
 
         final_equity = equity_values[-1]
+        total_return_pct = (final_equity - initial_equity) / initial_equity if initial_equity else 0.0
         return BacktestPerformanceSummary(
             initial_equity=initial_equity,
             final_equity=final_equity,
-            total_return_pct=(final_equity - initial_equity) / initial_equity if initial_equity else 0.0,
+            total_return_pct=total_return_pct,
             final_unrealized_pnl=float(self.equity_curve[-1].unrealized_pnl),
             realized_pnl=self.realized_pnl,
             fees_paid=self.fees_paid,
@@ -393,6 +775,43 @@ class EventDrivenBacktestResult:
             min_equity=min(equity_values),
             max_drawdown_amount=max_drawdown_amount,
             max_drawdown_pct=max_drawdown_pct,
+            return_to_max_drawdown=total_return_pct / max_drawdown_pct if max_drawdown_pct else None,
+            max_drawdown_duration_bars=max_drawdown_duration_bars,
+            drawdown_point_count=drawdown_point_count,
+            time_in_drawdown_pct=drawdown_point_count / len(self.equity_curve),
+            event_return_count=len(event_returns),
+            average_event_return_pct=average_event_return_pct,
+            best_event_return_pct=max(event_returns),
+            worst_event_return_pct=min(event_returns),
+            positive_event_return_count=positive_event_return_count,
+            negative_event_return_count=negative_event_return_count,
+            event_return_win_rate=positive_event_return_count / len(event_returns),
+            max_consecutive_positive_event_returns=max_consecutive_positive_event_returns,
+            max_consecutive_negative_event_returns=max_consecutive_negative_event_returns,
+            average_positive_event_return_pct=average_positive_event_return_pct,
+            average_negative_event_return_pct=average_negative_event_return_pct,
+            event_return_payoff_ratio=(
+                average_positive_event_return_pct / average_negative_event_return_pct
+                if average_positive_event_return_pct and average_negative_event_return_pct
+                else None
+            ),
+            event_return_profit_factor=(
+                positive_event_return_sum / negative_event_return_sum
+                if positive_event_return_sum and negative_event_return_sum
+                else None
+            ),
+            event_return_volatility_pct=event_return_volatility_pct,
+            event_return_risk_ratio=(
+                average_event_return_pct / event_return_volatility_pct
+                if event_return_volatility_pct
+                else None
+            ),
+            event_return_downside_volatility_pct=event_return_downside_volatility_pct,
+            event_return_sortino_ratio=(
+                average_event_return_pct / event_return_downside_volatility_pct
+                if event_return_downside_volatility_pct
+                else None
+            ),
             trade_count=trade_count,
             win_rate=win_rate,
             average_trade_net_pnl=average_trade_net_pnl,
@@ -403,6 +822,8 @@ class EventDrivenBacktestResult:
             average_win_net_pnl=average_win_net_pnl,
             average_loss_net_pnl=average_loss_net_pnl,
             payoff_ratio=payoff_ratio,
+            realized_trade_notional=realized_trade_notional,
+            realized_turnover_ratio=realized_turnover_ratio,
         )
 
     @property
@@ -427,6 +848,16 @@ class EventDrivenBacktestResult:
             for point in self.exposure_curve
             for group, bucket in point.group_exposure.items()
         ]
+        exchange_buckets = [
+            (exchange, bucket)
+            for point in self.exposure_curve
+            for exchange, bucket in point.exchange_exposure.items()
+        ]
+        market_type_buckets = [
+            (market_type, bucket)
+            for point in self.exposure_curve
+            for market_type, bucket in point.market_type_exposure.items()
+        ]
         max_gross_symbol = max(symbol_buckets, key=lambda item: item[1].gross_notional, default=None)
         max_open_risk_symbol = max(symbol_buckets, key=lambda item: item[1].open_risk, default=None)
         max_gross_layer = max(layer_buckets, key=lambda item: item[1].gross_notional, default=None)
@@ -435,6 +866,10 @@ class EventDrivenBacktestResult:
         max_open_risk_module = max(module_buckets, key=lambda item: item[1].open_risk, default=None)
         max_gross_group = max(group_buckets, key=lambda item: item[1].gross_notional, default=None)
         max_open_risk_group = max(group_buckets, key=lambda item: item[1].open_risk, default=None)
+        max_gross_exchange = max(exchange_buckets, key=lambda item: item[1].gross_notional, default=None)
+        max_open_risk_exchange = max(exchange_buckets, key=lambda item: item[1].open_risk, default=None)
+        max_gross_market_type = max(market_type_buckets, key=lambda item: item[1].gross_notional, default=None)
+        max_open_risk_market_type = max(market_type_buckets, key=lambda item: item[1].open_risk, default=None)
         return BacktestExposureSummary(
             max_position_count=max((point.position_count for point in self.exposure_curve), default=0),
             max_gross_notional=max((point.gross_notional for point in self.exposure_curve), default=0.0),
@@ -448,6 +883,10 @@ class EventDrivenBacktestResult:
             max_module_open_risk=max_open_risk_module[1].open_risk if max_open_risk_module else 0.0,
             max_group_gross_notional=max_gross_group[1].gross_notional if max_gross_group else 0.0,
             max_group_open_risk=max_open_risk_group[1].open_risk if max_open_risk_group else 0.0,
+            max_exchange_gross_notional=max_gross_exchange[1].gross_notional if max_gross_exchange else 0.0,
+            max_exchange_open_risk=max_open_risk_exchange[1].open_risk if max_open_risk_exchange else 0.0,
+            max_market_type_gross_notional=max_gross_market_type[1].gross_notional if max_gross_market_type else 0.0,
+            max_market_type_open_risk=max_open_risk_market_type[1].open_risk if max_open_risk_market_type else 0.0,
             max_symbol_gross_notional_symbol=max_gross_symbol[0] if max_gross_symbol else None,
             max_symbol_open_risk_symbol=max_open_risk_symbol[0] if max_open_risk_symbol else None,
             max_layer_gross_notional_layer=max_gross_layer[0] if max_gross_layer else None,
@@ -456,12 +895,25 @@ class EventDrivenBacktestResult:
             max_module_open_risk_module=max_open_risk_module[0] if max_open_risk_module else None,
             max_group_gross_notional_group=max_gross_group[0] if max_gross_group else None,
             max_group_open_risk_group=max_open_risk_group[0] if max_open_risk_group else None,
+            max_exchange_gross_notional_exchange=max_gross_exchange[0] if max_gross_exchange else None,
+            max_exchange_open_risk_exchange=max_open_risk_exchange[0] if max_open_risk_exchange else None,
+            max_market_type_gross_notional_market_type=max_gross_market_type[0] if max_gross_market_type else None,
+            max_market_type_open_risk_market_type=max_open_risk_market_type[0] if max_open_risk_market_type else None,
         )
 
     def _bucket_by(self, key_fn) -> dict[str, BacktestAttributionBucket]:
         buckets: dict[str, list[BacktestTrade]] = {}
         for trade in self.trades:
             buckets.setdefault(key_fn(trade), []).append(trade)
+        return {key: self._attribution_bucket(items) for key, items in buckets.items()}
+
+    def _bucket_by_market_field(self, key_fn) -> dict[str, BacktestAttributionBucket]:
+        buckets: dict[str, list[BacktestTrade]] = {}
+        for trade in self.trades:
+            market = self.markets_by_symbol.get(trade.symbol)
+            key = key_fn(market) if market is not None else None
+            if key:
+                buckets.setdefault(key, []).append(trade)
         return {key: self._attribution_bucket(items) for key, items in buckets.items()}
 
     def _attribution_bucket(self, trades: list[BacktestTrade]) -> BacktestAttributionBucket:
@@ -477,6 +929,10 @@ class EventDrivenBacktestResult:
             net_pnl=sum(item.net_pnl for item in trades),
             fees_paid=sum(item.entry_fee + item.exit_fee for item in trades),
             win_count=sum(item.net_pnl > 0 for item in trades),
+            realized_trade_notional=sum(
+                (abs(item.entry_price) + abs(item.exit_price)) * item.quantity
+                for item in trades
+            ),
             average_holding_bars=self._average_holding_bars(trades),
             gross_profit=gross_profit,
             gross_loss=gross_loss,
@@ -524,8 +980,14 @@ class EventDrivenBacktest:
         exposure_curve: list[BacktestExposurePoint] = []
         trades: list[BacktestTrade] = []
         terminal_orders: list[PortfolioOrder] = []
+        order_latency: list[BacktestOrderLatency] = []
+        equity_peak = float(self.account.equity)
+        previous_equity = float(self.account.equity)
+        equity_drawdown_duration_bars = 0
         events: list[tuple[object, str, int]] = []
         order_first_seen_bar: dict[str, int] = {}
+        latency_recorded_order_ids: set[str] = set()
+        last_bar_by_symbol: dict[str, int] = {}
         latest_prices: dict[str, float] = {}
         cash = self.account.equity
         realized_pnl = 0.0
@@ -538,6 +1000,7 @@ class EventDrivenBacktest:
             events.extend((features.index[bar_index], symbol, bar_index) for bar_index in range(len(features)))
 
         for timestamp, symbol, bar_index in sorted(events, key=lambda event: (event[0], event[1])):
+            last_bar_by_symbol[symbol] = bar_index
             features = features_by_symbol[symbol]
             window = features.iloc[: bar_index + 1]
             fill_price = float(window["Close"].iloc[-1]) if "Close" in window.columns else None
@@ -566,6 +1029,13 @@ class EventDrivenBacktest:
             filled_orders.extend(event_fills)
             expired_orders = self._cancel_expired_orders(event_orders, order_first_seen_bar, bar_index)
             terminal_orders.extend(expired_orders)
+            self._record_order_latency(
+                order_latency,
+                latency_recorded_order_ids,
+                event_fills + expired_orders,
+                order_first_seen_bar,
+                bar_index,
+            )
             event_fees = submitted_entry_fees
             fees_paid += event_fees
             cash -= event_fees
@@ -591,8 +1061,27 @@ class EventDrivenBacktest:
             fees_paid += exit_fees
             cash += event_realized - exit_fees
             state_history.append(self._snapshot(symbol, timestamp, bar_index))
-            equity_curve.append(self._equity_point(symbol, timestamp, bar_index, cash, latest_prices))
+            equity_point = self._equity_point(symbol, timestamp, bar_index, cash, latest_prices)
+            if equity_point.equity >= equity_peak:
+                equity_peak = equity_point.equity
+                equity_drawdown_duration_bars = 0
+            else:
+                equity_drawdown_duration_bars += 1
+            drawdown_amount = equity_peak - equity_point.equity
+            equity_curve.append(
+                replace(
+                    equity_point,
+                    return_pct=(equity_point.equity - previous_equity) / previous_equity if previous_equity else 0.0,
+                    equity_peak=equity_peak,
+                    drawdown_amount=drawdown_amount,
+                    drawdown_pct=drawdown_amount / equity_peak if equity_peak else 0.0,
+                    drawdown_duration_bars=equity_drawdown_duration_bars,
+                )
+            )
+            previous_equity = equity_point.equity
             exposure_curve.append(self._exposure_point(symbol, timestamp, bar_index, latest_prices))
+
+        open_order_ages = self._open_order_ages(order_first_seen_bar, last_bar_by_symbol)
 
         return EventDrivenBacktestResult(
             steps=steps,
@@ -603,6 +1092,9 @@ class EventDrivenBacktest:
             exposure_curve=exposure_curve,
             trades=trades,
             terminal_orders=terminal_orders,
+            order_latency=order_latency,
+            open_order_ages=open_order_ages,
+            markets_by_symbol=self.markets_by_symbol,
             realized_pnl=realized_pnl,
             fees_paid=fees_paid,
             funding_paid=funding_paid,
@@ -632,6 +1124,67 @@ class EventDrivenBacktest:
         for order in orders:
             if order.order_id and order.status in {OrderStatus.SUBMITTED, OrderStatus.PARTIALLY_FILLED}:
                 order_first_seen_bar.setdefault(order.order_id, bar_index)
+
+    @staticmethod
+    def _record_order_latency(
+        order_latency: list[BacktestOrderLatency],
+        recorded_order_ids: set[str],
+        orders: list[PortfolioOrder],
+        order_first_seen_bar: dict[str, int],
+        bar_index: int,
+    ) -> None:
+        terminal_statuses = {OrderStatus.FILLED, OrderStatus.CANCELED, OrderStatus.REJECTED}
+        for order in orders:
+            if not order.order_id or order.order_id in recorded_order_ids:
+                continue
+            if order.status not in terminal_statuses:
+                continue
+            if order.order_id not in order_first_seen_bar:
+                continue
+            submitted_bar_index = order_first_seen_bar[order.order_id]
+            order_latency.append(
+                BacktestOrderLatency(
+                    order_id=order.order_id,
+                    action=order.action,
+                    status=order.status,
+                    symbol=order.symbol,
+                    layer=order.layer,
+                    module=EventDrivenBacktestResult._order_module(order),
+                    submitted_bar_index=submitted_bar_index,
+                    resolved_bar_index=bar_index,
+                    wait_bars=bar_index - submitted_bar_index,
+                )
+            )
+            recorded_order_ids.add(order.order_id)
+
+    def _open_order_ages(
+        self,
+        order_first_seen_bar: dict[str, int],
+        last_bar_by_symbol: dict[str, int],
+    ) -> list[BacktestOpenOrderAge]:
+        open_statuses = {OrderStatus.SUBMITTED, OrderStatus.PARTIALLY_FILLED}
+        rows: list[BacktestOpenOrderAge] = []
+        for order in self.pipeline.portfolio_engine.state.orders.values():
+            if not order.order_id or order.status not in open_statuses:
+                continue
+            submitted_bar_index = order_first_seen_bar.get(order.order_id)
+            current_bar_index = last_bar_by_symbol.get(order.symbol)
+            if submitted_bar_index is None or current_bar_index is None:
+                continue
+            rows.append(
+                BacktestOpenOrderAge(
+                    order_id=order.order_id,
+                    action=order.action,
+                    status=order.status,
+                    symbol=order.symbol,
+                    layer=order.layer,
+                    module=EventDrivenBacktestResult._order_module(order),
+                    submitted_bar_index=submitted_bar_index,
+                    current_bar_index=current_bar_index,
+                    age_bars=current_bar_index - submitted_bar_index,
+                )
+            )
+        return rows
 
     def _fill_submitted_orders(
         self,
@@ -698,8 +1251,6 @@ class EventDrivenBacktest:
             if current_order is None:
                 continue
             if current_order.status not in {OrderStatus.SUBMITTED, OrderStatus.PARTIALLY_FILLED}:
-                continue
-            if current_order.filled_quantity > 0:
                 continue
             first_seen = order_first_seen_bar.get(order.order_id, bar_index)
             if bar_index - first_seen <= max_age:
@@ -1170,7 +1721,29 @@ class EventDrivenBacktest:
         layer_stats: dict[str, dict[str, float]] = {}
         module_stats: dict[str, dict[str, float]] = {}
         group_stats: dict[str, dict[str, float]] = {}
+        exchange_stats: dict[str, dict[str, float]] = {}
+        market_type_stats: dict[str, dict[str, float]] = {}
         positions = list(self.pipeline.portfolio_engine.state.positions.values())
+
+        def add_stats(stats_by_key: dict[str, dict[str, float]], key: str | None, position: Position, notional: float):
+            if not key:
+                return
+            stats = stats_by_key.setdefault(
+                key,
+                {
+                    "position_count": 0.0,
+                    "long_notional": 0.0,
+                    "short_notional": 0.0,
+                    "open_risk": 0.0,
+                },
+            )
+            stats["position_count"] += 1.0
+            stats["open_risk"] += position.risk_amount
+            if position.direction == Direction.LONG:
+                stats["long_notional"] += notional
+            elif position.direction == Direction.SHORT:
+                stats["short_notional"] += notional
+
         for position in positions:
             current_price = latest_prices.get(position.symbol, position.entry_price)
             notional = current_price * position.quantity * self._contract_multiplier(position.symbol)
@@ -1225,21 +1798,11 @@ class EventDrivenBacktest:
                 stats["short_notional"] += notional
             group = self._correlation_group(position.symbol)
             if group:
-                stats = group_stats.setdefault(
-                    group,
-                    {
-                        "position_count": 0.0,
-                        "long_notional": 0.0,
-                        "short_notional": 0.0,
-                        "open_risk": 0.0,
-                    },
-                )
-                stats["position_count"] += 1.0
-                stats["open_risk"] += position.risk_amount
-                if position.direction == Direction.LONG:
-                    stats["long_notional"] += notional
-                elif position.direction == Direction.SHORT:
-                    stats["short_notional"] += notional
+                add_stats(group_stats, group, position, notional)
+            market = self.markets_by_symbol.get(position.symbol)
+            if market is not None:
+                add_stats(exchange_stats, market.exchange, position, notional)
+                add_stats(market_type_stats, market.market_type, position, notional)
         return BacktestExposurePoint(
             symbol=symbol,
             timestamp=timestamp,
@@ -1254,6 +1817,8 @@ class EventDrivenBacktest:
             layer_exposure=self._exposure_buckets(layer_stats),
             module_exposure=self._exposure_buckets(module_stats),
             group_exposure=self._exposure_buckets(group_stats),
+            exchange_exposure=self._exposure_buckets(exchange_stats),
+            market_type_exposure=self._exposure_buckets(market_type_stats),
         )
 
     def _exposure_buckets(self, stats_by_key: dict[str, dict[str, float]]) -> dict[str, BacktestExposureBucket]:

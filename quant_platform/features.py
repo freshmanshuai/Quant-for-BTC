@@ -231,6 +231,16 @@ class VolumeFeatureModule:
         out[sma_col] = out["Volume"].rolling(lookback, min_periods=1).mean()
         out[std_col] = out["Volume"].rolling(lookback, min_periods=1).std()
         out[z_col] = (out["Volume"] - out[sma_col]) / out[std_col].clip(lower=1e-10)
+        if "Turnover" in out.columns:
+            turnover_sma_col = f"turnover_sma_{lookback}"
+            turnover_std_col = f"turnover_std_{lookback}"
+            turnover_z_col = f"turnover_zscore_{lookback}"
+            out[turnover_sma_col] = out["Turnover"].rolling(lookback, min_periods=1).mean()
+            out[turnover_std_col] = out["Turnover"].rolling(lookback, min_periods=1).std()
+            out[turnover_z_col] = (
+                (out["Turnover"] - out[turnover_sma_col])
+                / out[turnover_std_col].clip(lower=1e-10)
+            )
         return out
 
 

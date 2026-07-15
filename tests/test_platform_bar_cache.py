@@ -230,9 +230,11 @@ class BarCacheTest(unittest.TestCase):
                 funding_limit=1000,
                 open_interest_timeframe="4h",
                 open_interest_limit=1000,
+                start=None,
+                end=None,
             ):
                 calls["fetch"] += 1
-                calls["fetch_args"] = (market, funding_limit, open_interest_timeframe, open_interest_limit)
+                calls["fetch_args"] = (market, funding_limit, open_interest_timeframe, open_interest_limit, start, end)
                 return fetched
 
         market = MarketSpec(
@@ -249,15 +251,26 @@ class BarCacheTest(unittest.TestCase):
             funding_limit=250,
             open_interest_timeframe="1h",
             open_interest_limit=300,
+            start=pd.Timestamp("2024-01-01T00:00:00Z"),
+            end=pd.Timestamp("2024-01-01T01:00:00Z"),
         )
 
-        self.assertIs(result, fetched)
+        pd.testing.assert_frame_equal(result, fetched)
         self.assertEqual(calls["read"], 1)
         self.assertEqual(calls["fetch"], 1)
         self.assertEqual(calls["write"], 1)
         self.assertEqual(calls["written_series_id"].cache_key, "ccxt/binance/swap/BTC_USDT/1h/derivatives")
-        self.assertIs(calls["written_derivatives"], fetched)
-        self.assertEqual(calls["fetch_args"][1:], (250, "1h", 300))
+        pd.testing.assert_frame_equal(calls["written_derivatives"], fetched)
+        self.assertEqual(
+            calls["fetch_args"][1:],
+            (
+                250,
+                "1h",
+                300,
+                pd.Timestamp("2024-01-01T00:00:00Z"),
+                pd.Timestamp("2024-01-01T01:00:00Z"),
+            ),
+        )
 
     def test_fetch_derivatives_with_cache_refresh_bypasses_store_read(self):
         from quant_platform import fetch_derivatives_with_cache
@@ -284,6 +297,8 @@ class BarCacheTest(unittest.TestCase):
                 funding_limit=1000,
                 open_interest_timeframe="4h",
                 open_interest_limit=1000,
+                start=None,
+                end=None,
             ):
                 calls["fetch"] += 1
                 return fetched

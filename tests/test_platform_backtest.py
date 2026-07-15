@@ -1,3 +1,4 @@
+import math
 import unittest
 
 import pandas as pd
@@ -298,6 +299,119 @@ class LossThenSecondSymbolSignal:
 
 
 class EventDrivenBacktestTest(unittest.TestCase):
+    def test_order_lifecycle_summary_is_exported_from_platform_package(self):
+        from quant_platform import (
+            BacktestOpenOrderAge,
+            BacktestOpenOrderAgeSummary,
+            BacktestOrderLatency,
+            BacktestOrderLatencySummary,
+            BacktestOrderLifecycleSummary,
+        )
+        from quant_platform.portfolio import OrderAction, OrderStatus
+
+        summary = BacktestOrderLifecycleSummary(
+            total_order_count=2,
+            submitted_count=1,
+            partially_filled_count=0,
+            filled_count=1,
+            canceled_count=0,
+            rejected_count=0,
+            resolved_count=1,
+            open_count=1,
+            terminal_count=0,
+            fill_rate=0.5,
+            open_rate=0.5,
+            terminal_rate=0.0,
+        )
+
+        self.assertEqual(summary.total_order_count, 2)
+        self.assertAlmostEqual(summary.fill_rate, 0.5)
+        latency = BacktestOrderLatency(
+            order_id="order-1",
+            action=OrderAction.OPEN,
+            status=OrderStatus.FILLED,
+            symbol="BTC/USDT",
+            layer="core",
+            module="breakout",
+            submitted_bar_index=1,
+            resolved_bar_index=2,
+            wait_bars=1,
+        )
+        age = BacktestOpenOrderAge(
+            order_id="order-2",
+            action=OrderAction.OPEN,
+            status=OrderStatus.SUBMITTED,
+            symbol="BTC/USDT",
+            layer="core",
+            module="breakout",
+            submitted_bar_index=1,
+            current_bar_index=3,
+            age_bars=2,
+        )
+        latency_summary = BacktestOrderLatencySummary(
+            resolved_count=1,
+            average_wait_bars=1.0,
+            max_wait_bars=1,
+            filled_count=1,
+        )
+        age_summary = BacktestOpenOrderAgeSummary(
+            open_count=1,
+            average_age_bars=2.0,
+            max_age_bars=2,
+            submitted_count=1,
+        )
+
+        self.assertEqual(latency.wait_bars, 1)
+        self.assertEqual(age.age_bars, 2)
+        self.assertEqual(latency_summary.filled_count, 1)
+        self.assertEqual(age_summary.submitted_count, 1)
+
+    def test_exposure_analytics_types_are_exported_from_platform_package(self):
+        from quant_platform import (
+            BacktestExposureBucket,
+            BacktestExposurePoint,
+            BacktestExposureSummary,
+        )
+
+        bucket = BacktestExposureBucket(
+            position_count=1,
+            long_notional=1000.0,
+            short_notional=0.0,
+            gross_notional=1000.0,
+            net_notional=1000.0,
+            open_risk=50.0,
+        )
+        point = BacktestExposurePoint(
+            symbol="BTC/USDT",
+            timestamp="2026-06-26T00:00:00Z",
+            bar_index=1,
+            position_count=1,
+            long_notional=1000.0,
+            short_notional=0.0,
+            gross_notional=1000.0,
+            net_notional=1000.0,
+            open_risk=50.0,
+            symbol_exposure={"BTC/USDT": bucket},
+        )
+        summary = BacktestExposureSummary(
+            max_position_count=1,
+            max_gross_notional=1000.0,
+            max_abs_net_notional=1000.0,
+            max_open_risk=50.0,
+            max_symbol_gross_notional=1000.0,
+            max_symbol_open_risk=50.0,
+            max_layer_gross_notional=1000.0,
+            max_layer_open_risk=50.0,
+            max_module_gross_notional=1000.0,
+            max_module_open_risk=50.0,
+            max_group_gross_notional=1000.0,
+            max_group_open_risk=50.0,
+            max_symbol_gross_notional_symbol="BTC/USDT",
+        )
+
+        self.assertEqual(point.symbol_exposure["BTC/USDT"].open_risk, 50.0)
+        self.assertEqual(summary.max_symbol_gross_notional_symbol, "BTC/USDT")
+
     def test_runs_signal_pipeline_over_multiple_symbols_and_bars(self):
         from quant_platform.backtest import EventDrivenBacktest
         from quant_platform.delivery import InMemoryDeliveryChannel
@@ -393,7 +507,7 @@ class EventDrivenBacktestTest(unittest.TestCase):
             ),
             "ETH/USDT": MarketSpec(
                 asset=AssetSpec(symbol="ETH/USDT", base="ETH", quote="USDT"),
-                exchange="binance",
+                exchange="okx",
                 market_type="swap",
                 correlation_group="crypto",
                 supports_short=True,
@@ -451,6 +565,18 @@ class EventDrivenBacktestTest(unittest.TestCase):
         self.assertAlmostEqual(module_exposure["ETH/USDT_module"].short_notional, 1100.0)
         self.assertAlmostEqual(module_exposure["ETH/USDT_module"].gross_notional, 1100.0)
         self.assertAlmostEqual(module_exposure["ETH/USDT_module"].open_risk, 100.0)
+        exchange_exposure = result.exposure_curve[-1].exchange_exposure
+        self.assertAlmostEqual(exchange_exposure["binance"].long_notional, 2100.0)
+        self.assertAlmostEqual(exchange_exposure["binance"].gross_notional, 2100.0)
+        self.assertAlmostEqual(exchange_exposure["binance"].open_risk, 100.0)
+        self.assertAlmostEqual(exchange_exposure["okx"].short_notional, 1100.0)
+        self.assertAlmostEqual(exchange_exposure["okx"].gross_notional, 1100.0)
+        self.assertAlmostEqual(exchange_exposure["okx"].open_risk, 100.0)
+        market_type_exposure = result.exposure_curve[-1].market_type_exposure
+        self.assertAlmostEqual(market_type_exposure["swap"].long_notional, 2100.0)
+        self.assertAlmostEqual(market_type_exposure["swap"].short_notional, 1100.0)
+        self.assertAlmostEqual(market_type_exposure["swap"].gross_notional, 3200.0)
+        self.assertAlmostEqual(market_type_exposure["swap"].open_risk, 200.0)
 
     def test_summarizes_peak_portfolio_exposure_from_exposure_curve(self):
         from quant_platform.backtest import EventDrivenBacktest
@@ -514,6 +640,14 @@ class EventDrivenBacktestTest(unittest.TestCase):
         self.assertAlmostEqual(summary.max_group_open_risk, 200.0)
         self.assertEqual(summary.max_group_gross_notional_group, "crypto")
         self.assertEqual(summary.max_group_open_risk_group, "crypto")
+        self.assertAlmostEqual(summary.max_exchange_gross_notional, 3200.0)
+        self.assertAlmostEqual(summary.max_exchange_open_risk, 200.0)
+        self.assertEqual(summary.max_exchange_gross_notional_exchange, "binance")
+        self.assertEqual(summary.max_exchange_open_risk_exchange, "binance")
+        self.assertAlmostEqual(summary.max_market_type_gross_notional, 3200.0)
+        self.assertAlmostEqual(summary.max_market_type_open_risk, 200.0)
+        self.assertEqual(summary.max_market_type_gross_notional_market_type, "swap")
+        self.assertEqual(summary.max_market_type_open_risk_market_type, "swap")
         self.assertAlmostEqual(summary.max_symbol_gross_notional, 2100.0)
         self.assertAlmostEqual(summary.max_symbol_open_risk, 100.0)
         self.assertEqual(summary.max_symbol_gross_notional_symbol, "BTC/USDT")
@@ -589,6 +723,48 @@ class EventDrivenBacktestTest(unittest.TestCase):
         self.assertAlmostEqual(summary.min_equity, 9_700.0)
         self.assertAlmostEqual(summary.max_drawdown_amount, 800.0)
         self.assertAlmostEqual(summary.max_drawdown_pct, 800.0 / 10_500.0)
+        self.assertAlmostEqual(summary.return_to_max_drawdown, 0.01 / (800.0 / 10_500.0))
+        self.assertEqual(summary.max_drawdown_duration_bars, 2)
+        self.assertEqual(summary.drawdown_point_count, 2)
+        self.assertAlmostEqual(summary.time_in_drawdown_pct, 0.5)
+        self.assertEqual(summary.event_return_count, 4)
+        self.assertAlmostEqual(summary.average_event_return_pct, (0.0 + 0.05 - 800.0 / 10_500.0 + 400.0 / 9_700.0) / 4)
+        self.assertAlmostEqual(summary.best_event_return_pct, 0.05)
+        self.assertAlmostEqual(summary.worst_event_return_pct, -800.0 / 10_500.0)
+        self.assertEqual(summary.positive_event_return_count, 2)
+        self.assertEqual(summary.negative_event_return_count, 1)
+        self.assertAlmostEqual(summary.event_return_win_rate, 0.5)
+        self.assertEqual(summary.max_consecutive_positive_event_returns, 1)
+        self.assertEqual(summary.max_consecutive_negative_event_returns, 1)
+        expected_event_returns = [0.0, 0.05, -800.0 / 10_500.0, 400.0 / 9_700.0]
+        expected_positive_event_average = (0.05 + 400.0 / 9_700.0) / 2
+        expected_negative_event_average = 800.0 / 10_500.0
+        self.assertAlmostEqual(summary.average_positive_event_return_pct, expected_positive_event_average)
+        self.assertAlmostEqual(summary.average_negative_event_return_pct, expected_negative_event_average)
+        self.assertAlmostEqual(summary.event_return_payoff_ratio, expected_positive_event_average / expected_negative_event_average)
+        self.assertAlmostEqual(
+            summary.event_return_profit_factor,
+            (0.05 + 400.0 / 9_700.0) / (800.0 / 10_500.0),
+        )
+        expected_event_return_average = sum(expected_event_returns) / len(expected_event_returns)
+        expected_event_return_volatility = math.sqrt(
+            sum((return_pct - expected_event_return_average) ** 2 for return_pct in expected_event_returns)
+            / len(expected_event_returns)
+        )
+        self.assertAlmostEqual(summary.event_return_volatility_pct, expected_event_return_volatility)
+        self.assertAlmostEqual(summary.event_return_risk_ratio, expected_event_return_average / expected_event_return_volatility)
+        expected_event_return_downside_volatility = math.sqrt(
+            sum((min(return_pct, 0.0)) ** 2 for return_pct in expected_event_returns)
+            / len(expected_event_returns)
+        )
+        self.assertAlmostEqual(
+            summary.event_return_downside_volatility_pct,
+            expected_event_return_downside_volatility,
+        )
+        self.assertAlmostEqual(
+            summary.event_return_sortino_ratio,
+            expected_event_return_average / expected_event_return_downside_volatility,
+        )
         self.assertEqual(summary.trade_count, 2)
         self.assertAlmostEqual(summary.win_rate, 0.5)
         self.assertAlmostEqual(summary.average_trade_net_pnl, 125.0)
@@ -599,6 +775,8 @@ class EventDrivenBacktestTest(unittest.TestCase):
         self.assertAlmostEqual(summary.average_win_net_pnl, 300.0)
         self.assertAlmostEqual(summary.average_loss_net_pnl, 50.0)
         self.assertAlmostEqual(summary.payoff_ratio, 6.0)
+        self.assertAlmostEqual(summary.realized_trade_notional, 4_250.0)
+        self.assertAlmostEqual(summary.realized_turnover_ratio, 0.425)
 
     def test_fills_submitted_orders_and_records_state_history(self):
         from quant_platform.backtest import EventDrivenBacktest
@@ -672,6 +850,11 @@ class EventDrivenBacktestTest(unittest.TestCase):
         self.assertEqual(result.orders[-1].action, OrderAction.IGNORE)
         self.assertEqual(result.orders[-1].reason, "risk_blocked:max_drawdown_limit")
         self.assertAlmostEqual(result.equity_curve[-1].equity, 8_000.0)
+        self.assertAlmostEqual(result.equity_curve[-1].equity_peak, 10_000.0)
+        self.assertAlmostEqual(result.equity_curve[-1].return_pct, 0.0)
+        self.assertAlmostEqual(result.equity_curve[-1].drawdown_amount, 2_000.0)
+        self.assertAlmostEqual(result.equity_curve[-1].drawdown_pct, 0.2)
+        self.assertEqual(result.equity_curve[-1].drawdown_duration_bars, 2)
 
     def test_records_realized_losses_into_risk_state_before_later_events(self):
         from quant_platform.backtest import EventDrivenBacktest
@@ -758,6 +941,57 @@ class EventDrivenBacktestTest(unittest.TestCase):
         self.assertEqual(result.order_status_counts[OrderStatus.SUBMITTED], 1)
         self.assertEqual(result.order_status_counts[OrderStatus.FILLED], 0)
 
+    def test_summarizes_open_order_age_for_unresolved_submitted_orders(self):
+        from quant_platform.backtest import BacktestExecutionConfig, EventDrivenBacktest
+        from quant_platform.pipeline import SignalPipeline
+        from quant_platform.portfolio import OrderStatus, PortfolioEngine
+        from quant_platform.risk import AccountState, RiskEngine, RiskLimits
+        from quant_platform.signal_modules import SignalModuleRunner
+
+        index = pd.date_range("2026-06-03", periods=4, freq="4h", tz="UTC")
+        features_by_symbol = {
+            "BTC/USDT": pd.DataFrame(
+                {
+                    "High": [101.0, 104.0, 104.0, 104.0],
+                    "Low": [99.0, 103.0, 103.0, 103.0],
+                    "Close": [100.0, 105.0, 104.0, 104.0],
+                },
+                index=index,
+            ),
+        }
+        portfolio_engine = PortfolioEngine(max_positions_per_symbol=1)
+        pipeline = SignalPipeline(
+            signal_runner=SignalModuleRunner([SignalOnlyOnSecondBar()]),
+            risk_engine=RiskEngine(RiskLimits(risk_per_trade=0.01, max_position_fraction=1.0)),
+            portfolio_engine=portfolio_engine,
+        )
+        backtest = EventDrivenBacktest(
+            pipeline=pipeline,
+            account=AccountState(equity=10_000.0),
+            execution=BacktestExecutionConfig(intrabar_entry_limit=True),
+        )
+
+        result = backtest.run(features_by_symbol)
+
+        self.assertEqual(result.filled_orders, [])
+        self.assertEqual(result.terminal_orders, [])
+        self.assertEqual(result.order_status_counts[OrderStatus.SUBMITTED], 1)
+        self.assertEqual(len(result.open_order_ages), 1)
+        self.assertEqual(result.open_order_ages[0].status, OrderStatus.SUBMITTED)
+        self.assertEqual(result.open_order_ages[0].submitted_bar_index, 1)
+        self.assertEqual(result.open_order_ages[0].current_bar_index, 3)
+        self.assertEqual(result.open_order_ages[0].age_bars, 2)
+        self.assertEqual(result.open_order_age_summary.open_count, 1)
+        self.assertEqual(result.open_order_age_summary.submitted_count, 1)
+        self.assertAlmostEqual(result.open_order_age_summary.average_age_bars, 2.0)
+        self.assertEqual(result.open_order_age_summary.max_age_bars, 2)
+        self.assertEqual(result.order_lifecycle_summary.total_order_count, 1)
+        self.assertEqual(result.order_lifecycle_summary.open_count, 1)
+        self.assertEqual(result.order_lifecycle_summary.resolved_count, 0)
+        self.assertEqual(result.order_lifecycle_summary.terminal_count, 0)
+        self.assertAlmostEqual(result.order_lifecycle_summary.open_rate, 1.0)
+        self.assertAlmostEqual(result.order_lifecycle_summary.fill_rate, 0.0)
+
     def test_pending_intrabar_entry_limit_fills_when_later_bar_touches_price(self):
         from quant_platform.backtest import BacktestExecutionConfig, EventDrivenBacktest
         from quant_platform.pipeline import SignalPipeline
@@ -800,6 +1034,20 @@ class EventDrivenBacktestTest(unittest.TestCase):
         self.assertEqual(result.state_history[-1].position_count, 1)
         self.assertEqual(result.order_status_counts[OrderStatus.SUBMITTED], 0)
         self.assertEqual(result.order_status_counts[OrderStatus.FILLED], 1)
+        self.assertEqual(len(result.order_latency), 1)
+        self.assertEqual(result.order_latency[0].status, OrderStatus.FILLED)
+        self.assertEqual(result.order_latency[0].submitted_bar_index, 1)
+        self.assertEqual(result.order_latency[0].resolved_bar_index, 2)
+        self.assertEqual(result.order_latency[0].wait_bars, 1)
+        self.assertEqual(result.order_latency_summary.resolved_count, 1)
+        self.assertAlmostEqual(result.order_latency_summary.average_wait_bars, 1.0)
+        self.assertEqual(result.order_latency_summary.max_wait_bars, 1)
+        self.assertEqual(result.order_lifecycle_summary.total_order_count, 1)
+        self.assertEqual(result.order_lifecycle_summary.filled_count, 1)
+        self.assertEqual(result.order_lifecycle_summary.resolved_count, 1)
+        self.assertEqual(result.order_lifecycle_summary.open_count, 0)
+        self.assertAlmostEqual(result.order_lifecycle_summary.fill_rate, 1.0)
+        self.assertAlmostEqual(result.order_lifecycle_summary.open_rate, 0.0)
 
     def test_pending_entry_order_can_expire_after_configured_bar_age(self):
         from quant_platform.backtest import BacktestExecutionConfig, EventDrivenBacktest
@@ -842,6 +1090,20 @@ class EventDrivenBacktestTest(unittest.TestCase):
         self.assertEqual(result.state_history[-1].position_count, 0)
         self.assertEqual(result.order_status_counts[OrderStatus.SUBMITTED], 0)
         self.assertEqual(result.order_status_counts[OrderStatus.CANCELED], 1)
+        self.assertEqual(len(result.order_latency), 1)
+        self.assertEqual(result.order_latency[0].status, OrderStatus.CANCELED)
+        self.assertEqual(result.order_latency[0].submitted_bar_index, 1)
+        self.assertEqual(result.order_latency[0].resolved_bar_index, 3)
+        self.assertEqual(result.order_latency[0].wait_bars, 2)
+        self.assertEqual(result.order_latency_summary.resolved_count, 1)
+        self.assertAlmostEqual(result.order_latency_summary.average_wait_bars, 2.0)
+        self.assertEqual(result.order_latency_summary.max_wait_bars, 2)
+        self.assertEqual(result.order_lifecycle_summary.total_order_count, 1)
+        self.assertEqual(result.order_lifecycle_summary.canceled_count, 1)
+        self.assertEqual(result.order_lifecycle_summary.resolved_count, 1)
+        self.assertEqual(result.order_lifecycle_summary.terminal_count, 1)
+        self.assertAlmostEqual(result.order_lifecycle_summary.terminal_rate, 1.0)
+        self.assertAlmostEqual(result.order_lifecycle_summary.fill_rate, 0.0)
 
     def test_execution_can_partially_fill_open_order_across_bars(self):
         from quant_platform.backtest import BacktestExecutionConfig, EventDrivenBacktest
@@ -887,6 +1149,58 @@ class EventDrivenBacktestTest(unittest.TestCase):
         self.assertAlmostEqual(result.fees_paid, 2.11)
         self.assertEqual(result.order_status_counts[OrderStatus.PARTIALLY_FILLED], 0)
         self.assertEqual(result.order_status_counts[OrderStatus.FILLED], 1)
+
+    def test_execution_can_cancel_stale_partially_filled_open_order_remainder(self):
+        from quant_platform.backtest import BacktestExecutionConfig, EventDrivenBacktest
+        from quant_platform.pipeline import SignalPipeline
+        from quant_platform.portfolio import OrderStatus, PortfolioEngine, PositionKey
+        from quant_platform.risk import AccountState, RiskEngine, RiskLimits
+        from quant_platform.signal_modules import SignalModuleRunner
+
+        index = pd.date_range("2026-06-03", periods=4, freq="4h", tz="UTC")
+        features_by_symbol = {
+            "BTC/USDT": pd.DataFrame(
+                {
+                    "Close": [100.0, 105.0, 106.0, 107.0],
+                    "Volume": [100.0, 10.0, 0.0, 0.0],
+                },
+                index=index,
+            ),
+        }
+        portfolio_engine = PortfolioEngine(max_positions_per_symbol=1)
+        pipeline = SignalPipeline(
+            signal_runner=SignalModuleRunner([SignalOnlyOnSecondBar()]),
+            risk_engine=RiskEngine(RiskLimits(risk_per_trade=0.01, max_position_fraction=1.0)),
+            portfolio_engine=portfolio_engine,
+        )
+        backtest = EventDrivenBacktest(
+            pipeline=pipeline,
+            account=AccountState(equity=10_000.0),
+            execution=BacktestExecutionConfig(
+                max_entry_volume_fraction_per_bar=1.0,
+                max_entry_order_age_bars=1,
+            ),
+        )
+
+        result = backtest.run(features_by_symbol)
+
+        self.assertEqual([order.status for order in result.filled_orders], [OrderStatus.PARTIALLY_FILLED])
+        self.assertAlmostEqual(result.filled_orders[0].filled_quantity, 10.0)
+        self.assertEqual([order.status for order in result.terminal_orders], [OrderStatus.CANCELED])
+        self.assertEqual(result.terminal_orders[0].reason, "entry_order_expired")
+        self.assertAlmostEqual(result.terminal_orders[0].filled_quantity, 10.0)
+        position = portfolio_engine.state.positions[PositionKey("BTC/USDT", "tactical")]
+        self.assertAlmostEqual(position.quantity, 10.0)
+        self.assertAlmostEqual(position.entry_price, 105.0)
+        self.assertEqual(result.state_history[-1].submitted_order_count, 0)
+        self.assertEqual(result.state_history[-1].position_count, 1)
+        self.assertEqual(result.order_status_counts[OrderStatus.CANCELED], 1)
+        self.assertEqual(result.order_status_counts[OrderStatus.PARTIALLY_FILLED], 0)
+        self.assertEqual(len(result.order_latency), 1)
+        self.assertEqual(result.order_latency[0].status, OrderStatus.CANCELED)
+        self.assertEqual(result.order_latency[0].wait_bars, 2)
+        self.assertEqual(result.order_lifecycle_summary.terminal_count, 1)
+        self.assertEqual(result.order_lifecycle_summary.open_count, 0)
 
     def test_execution_can_cap_entry_fills_by_bar_volume_participation(self):
         from quant_platform.backtest import BacktestExecutionConfig, EventDrivenBacktest
@@ -962,6 +1276,11 @@ class EventDrivenBacktestTest(unittest.TestCase):
         self.assertAlmostEqual(result.equity_curve[-1].cash, 9997.8979, places=4)
         self.assertAlmostEqual(result.equity_curve[-1].unrealized_pnl, 97.9, places=1)
         self.assertAlmostEqual(result.equity_curve[-1].equity, 10095.7979, places=4)
+        self.assertAlmostEqual(result.equity_curve[-1].equity_peak, 10095.7979, places=4)
+        self.assertGreater(result.equity_curve[-1].return_pct, 0.0)
+        self.assertAlmostEqual(result.equity_curve[-1].drawdown_amount, 0.0)
+        self.assertAlmostEqual(result.equity_curve[-1].drawdown_pct, 0.0)
+        self.assertEqual(result.equity_curve[-1].drawdown_duration_bars, 0)
 
     def test_entry_execution_can_use_order_book_spread_feature(self):
         from quant_platform.backtest import BacktestExecutionConfig, EventDrivenBacktest
@@ -1640,20 +1959,90 @@ class EventDrivenBacktestTest(unittest.TestCase):
 
         self.assertEqual(result.attribution.by_direction["long"].trade_count, 1)
         self.assertAlmostEqual(result.attribution.by_direction["long"].net_pnl, 98.0)
+        self.assertAlmostEqual(result.attribution.by_direction["long"].realized_trade_notional, 2_100.0)
         self.assertAlmostEqual(result.attribution.by_direction["long"].gross_profit, 98.0)
         self.assertAlmostEqual(result.attribution.by_direction["long"].gross_loss, 0.0)
         self.assertIsNone(result.attribution.by_direction["long"].profit_factor)
         self.assertEqual(result.attribution.by_direction["short"].trade_count, 1)
         self.assertAlmostEqual(result.attribution.by_direction["short"].net_pnl, -26.0)
+        self.assertAlmostEqual(result.attribution.by_direction["short"].realized_trade_notional, 525.0)
         self.assertAlmostEqual(result.attribution.by_direction["short"].average_holding_bars, 4.0)
         self.assertEqual(result.attribution.by_exit_reason["target"].trade_count, 1)
         self.assertAlmostEqual(result.attribution.by_exit_reason["target"].net_pnl, 98.0)
+        self.assertAlmostEqual(result.attribution.by_exit_reason["target"].realized_trade_notional, 2_100.0)
         self.assertEqual(result.attribution.by_exit_reason["stop"].trade_count, 1)
         self.assertAlmostEqual(result.attribution.by_exit_reason["stop"].average_holding_bars, 4.0)
+        self.assertAlmostEqual(result.attribution.by_exit_reason["stop"].realized_trade_notional, 525.0)
+        self.assertAlmostEqual(result.attribution.by_layer["tactical"].realized_trade_notional, 2_625.0)
         self.assertAlmostEqual(result.attribution.by_layer["tactical"].gross_profit, 98.0)
         self.assertAlmostEqual(result.attribution.by_layer["tactical"].gross_loss, 26.0)
         self.assertAlmostEqual(result.attribution.by_layer["tactical"].profit_factor, 98.0 / 26.0)
         self.assertAlmostEqual(result.attribution.by_layer["tactical"].payoff_ratio, 98.0 / 26.0)
+
+    def test_summarizes_realized_trade_attribution_by_market_metadata(self):
+        from quant_platform.backtest import BacktestTrade, EventDrivenBacktestResult
+        from quant_platform.core import AssetSpec, MarketSpec
+
+        result = EventDrivenBacktestResult(
+            steps=[],
+            markets_by_symbol={
+                "BTC/USDT": MarketSpec(
+                    asset=AssetSpec(symbol="BTC/USDT", base="BTC", quote="USDT"),
+                    exchange="binance",
+                    market_type="swap",
+                    correlation_group="crypto_major",
+                ),
+                "AAPL": MarketSpec(
+                    asset=AssetSpec(symbol="AAPL", base="AAPL", quote="USD"),
+                    exchange="nasdaq",
+                    market_type="equity",
+                    correlation_group="mega_cap",
+                ),
+            },
+            trades=[
+                BacktestTrade(
+                    symbol="BTC/USDT",
+                    layer="tactical",
+                    module="breakout",
+                    direction=Direction.LONG,
+                    entry_price=100.0,
+                    exit_price=110.0,
+                    quantity=10.0,
+                    gross_pnl=100.0,
+                    entry_fee=1.0,
+                    exit_fee=1.0,
+                    net_pnl=98.0,
+                    exit_reason="target",
+                    holding_bars=2,
+                ),
+                BacktestTrade(
+                    symbol="AAPL",
+                    layer="tactical",
+                    module="pullback",
+                    direction=Direction.LONG,
+                    entry_price=50.0,
+                    exit_price=55.0,
+                    quantity=5.0,
+                    gross_pnl=25.0,
+                    entry_fee=0.5,
+                    exit_fee=0.5,
+                    net_pnl=24.0,
+                    exit_reason="target",
+                    holding_bars=4,
+                ),
+            ],
+        )
+
+        self.assertEqual(result.attribution.by_exchange["binance"].trade_count, 1)
+        self.assertAlmostEqual(result.attribution.by_exchange["binance"].net_pnl, 98.0)
+        self.assertEqual(result.attribution.by_exchange["nasdaq"].trade_count, 1)
+        self.assertAlmostEqual(result.attribution.by_exchange["nasdaq"].net_pnl, 24.0)
+        self.assertEqual(result.attribution.by_market_type["swap"].trade_count, 1)
+        self.assertAlmostEqual(result.attribution.by_market_type["swap"].average_holding_bars, 2.0)
+        self.assertEqual(result.attribution.by_market_type["equity"].trade_count, 1)
+        self.assertAlmostEqual(result.attribution.by_market_type["equity"].average_holding_bars, 4.0)
+        self.assertEqual(result.attribution.by_correlation_group["crypto_major"].trade_count, 1)
+        self.assertEqual(result.attribution.by_correlation_group["mega_cap"].trade_count, 1)
 
     def test_summarizes_terminal_order_reasons(self):
         from quant_platform.backtest import EventDrivenBacktestResult
@@ -1745,6 +2134,16 @@ class EventDrivenBacktestTest(unittest.TestCase):
         self.assertEqual(result.order_action_counts[OrderAction.OPEN], 2)
         self.assertEqual(result.order_action_counts[OrderAction.CLOSE], 1)
         self.assertEqual(result.order_action_counts[OrderAction.REBALANCE], 0)
+        self.assertEqual(result.order_lifecycle_by_action[OrderAction.OPEN].total_order_count, 2)
+        self.assertEqual(result.order_lifecycle_by_action[OrderAction.OPEN].filled_count, 1)
+        self.assertEqual(result.order_lifecycle_by_action[OrderAction.OPEN].canceled_count, 1)
+        self.assertAlmostEqual(result.order_lifecycle_by_action[OrderAction.OPEN].fill_rate, 0.5)
+        self.assertAlmostEqual(result.order_lifecycle_by_action[OrderAction.OPEN].terminal_rate, 0.5)
+        self.assertEqual(result.order_lifecycle_by_action[OrderAction.CLOSE].total_order_count, 1)
+        self.assertEqual(result.order_lifecycle_by_action[OrderAction.CLOSE].terminal_count, 1)
+        self.assertAlmostEqual(result.order_lifecycle_by_action[OrderAction.CLOSE].terminal_rate, 1.0)
+        self.assertEqual(result.order_lifecycle_by_action[OrderAction.REBALANCE].total_order_count, 0)
+        self.assertAlmostEqual(result.order_lifecycle_by_action[OrderAction.REBALANCE].fill_rate, 0.0)
 
     def test_summarizes_order_modules(self):
         from quant_platform.backtest import EventDrivenBacktestResult
@@ -1815,6 +2214,14 @@ class EventDrivenBacktestTest(unittest.TestCase):
         )
 
         self.assertEqual(result.order_module_counts, {"breakout": 2, "pullback": 1})
+        self.assertEqual(result.order_lifecycle_by_module["breakout"].total_order_count, 2)
+        self.assertEqual(result.order_lifecycle_by_module["breakout"].filled_count, 1)
+        self.assertEqual(result.order_lifecycle_by_module["breakout"].canceled_count, 1)
+        self.assertAlmostEqual(result.order_lifecycle_by_module["breakout"].fill_rate, 0.5)
+        self.assertAlmostEqual(result.order_lifecycle_by_module["breakout"].terminal_rate, 0.5)
+        self.assertEqual(result.order_lifecycle_by_module["pullback"].total_order_count, 1)
+        self.assertEqual(result.order_lifecycle_by_module["pullback"].terminal_count, 1)
+        self.assertAlmostEqual(result.order_lifecycle_by_module["pullback"].terminal_rate, 1.0)
 
     def test_summarizes_order_symbols_and_layers(self):
         from quant_platform.backtest import EventDrivenBacktestResult
@@ -1860,6 +2267,187 @@ class EventDrivenBacktestTest(unittest.TestCase):
 
         self.assertEqual(result.order_symbol_counts, {"BTC/USDT": 2, "ETH/USDT": 1})
         self.assertEqual(result.order_layer_counts, {"core": 1, "tactical": 2})
+        self.assertEqual(result.order_lifecycle_by_symbol["BTC/USDT"].total_order_count, 2)
+        self.assertEqual(result.order_lifecycle_by_symbol["BTC/USDT"].filled_count, 1)
+        self.assertEqual(result.order_lifecycle_by_symbol["BTC/USDT"].canceled_count, 1)
+        self.assertAlmostEqual(result.order_lifecycle_by_symbol["BTC/USDT"].fill_rate, 0.5)
+        self.assertAlmostEqual(result.order_lifecycle_by_symbol["BTC/USDT"].terminal_rate, 0.5)
+        self.assertEqual(result.order_lifecycle_by_symbol["ETH/USDT"].total_order_count, 1)
+        self.assertEqual(result.order_lifecycle_by_symbol["ETH/USDT"].terminal_count, 1)
+        self.assertAlmostEqual(result.order_lifecycle_by_symbol["ETH/USDT"].terminal_rate, 1.0)
+        self.assertEqual(result.order_lifecycle_by_layer["core"].total_order_count, 1)
+        self.assertEqual(result.order_lifecycle_by_layer["core"].filled_count, 1)
+        self.assertAlmostEqual(result.order_lifecycle_by_layer["core"].fill_rate, 1.0)
+        self.assertEqual(result.order_lifecycle_by_layer["tactical"].total_order_count, 2)
+        self.assertEqual(result.order_lifecycle_by_layer["tactical"].terminal_count, 2)
+        self.assertEqual(result.order_lifecycle_by_layer["tactical"].canceled_count, 2)
+        self.assertAlmostEqual(result.order_lifecycle_by_layer["tactical"].terminal_rate, 1.0)
+
+    def test_summarizes_order_directions(self):
+        from quant_platform.backtest import EventDrivenBacktestResult
+        from quant_platform.core import AssetSpec, MarketSpec
+        from quant_platform.portfolio import OrderAction, OrderStatus, PortfolioOrder
+
+        result = EventDrivenBacktestResult(
+            steps=[],
+            markets_by_symbol={
+                "BTC/USDT": MarketSpec(
+                    asset=AssetSpec(symbol="BTC/USDT", base="BTC", quote="USDT"),
+                    exchange="binance",
+                    market_type="swap",
+                    correlation_group="crypto_major",
+                ),
+                "ETH/USDT": MarketSpec(
+                    asset=AssetSpec(symbol="ETH/USDT", base="ETH", quote="USDT"),
+                    exchange="binance",
+                    market_type="swap",
+                    correlation_group="crypto_major",
+                ),
+            },
+            filled_orders=[
+                PortfolioOrder(
+                    order_id="long-open",
+                    action=OrderAction.OPEN,
+                    symbol="BTC/USDT",
+                    layer="core",
+                    direction=Direction.LONG,
+                    quantity=10.0,
+                    reason="core long",
+                    status=OrderStatus.FILLED,
+                ),
+            ],
+            terminal_orders=[
+                PortfolioOrder(
+                    order_id="short-open",
+                    action=OrderAction.OPEN,
+                    symbol="ETH/USDT",
+                    layer="tactical",
+                    direction=Direction.SHORT,
+                    quantity=5.0,
+                    reason="entry_order_expired",
+                    status=OrderStatus.CANCELED,
+                ),
+            ],
+        )
+
+        self.assertEqual(result.order_lifecycle_by_direction["long"].total_order_count, 1)
+        self.assertEqual(result.order_lifecycle_by_direction["long"].filled_count, 1)
+        self.assertAlmostEqual(result.order_lifecycle_by_direction["long"].fill_rate, 1.0)
+        self.assertEqual(result.order_lifecycle_by_direction["short"].total_order_count, 1)
+        self.assertEqual(result.order_lifecycle_by_direction["short"].terminal_count, 1)
+        self.assertEqual(result.order_lifecycle_by_direction["short"].canceled_count, 1)
+        self.assertAlmostEqual(result.order_lifecycle_by_direction["short"].terminal_rate, 1.0)
+        self.assertEqual(result.order_lifecycle_by_correlation_group["crypto_major"].total_order_count, 2)
+        self.assertEqual(result.order_lifecycle_by_correlation_group["crypto_major"].filled_count, 1)
+        self.assertEqual(result.order_lifecycle_by_correlation_group["crypto_major"].terminal_count, 1)
+        self.assertAlmostEqual(result.order_lifecycle_by_correlation_group["crypto_major"].fill_rate, 0.5)
+        self.assertAlmostEqual(result.order_lifecycle_by_correlation_group["crypto_major"].terminal_rate, 0.5)
+
+    def test_summarizes_order_exchanges(self):
+        from quant_platform.backtest import EventDrivenBacktestResult
+        from quant_platform.core import AssetSpec, MarketSpec
+        from quant_platform.portfolio import OrderAction, OrderStatus, PortfolioOrder
+
+        result = EventDrivenBacktestResult(
+            steps=[],
+            markets_by_symbol={
+                "BTC/USDT": MarketSpec(
+                    asset=AssetSpec(symbol="BTC/USDT", base="BTC", quote="USDT"),
+                    exchange="binance",
+                    market_type="swap",
+                ),
+                "ETH/USDT": MarketSpec(
+                    asset=AssetSpec(symbol="ETH/USDT", base="ETH", quote="USDT"),
+                    exchange="okx",
+                    market_type="swap",
+                ),
+            },
+            filled_orders=[
+                PortfolioOrder(
+                    order_id="btc-open",
+                    action=OrderAction.OPEN,
+                    symbol="BTC/USDT",
+                    layer="core",
+                    direction=Direction.LONG,
+                    quantity=10.0,
+                    reason="core long",
+                    status=OrderStatus.FILLED,
+                ),
+            ],
+            terminal_orders=[
+                PortfolioOrder(
+                    order_id="eth-open",
+                    action=OrderAction.OPEN,
+                    symbol="ETH/USDT",
+                    layer="tactical",
+                    direction=Direction.LONG,
+                    quantity=5.0,
+                    reason="entry_order_expired",
+                    status=OrderStatus.CANCELED,
+                ),
+            ],
+        )
+
+        self.assertEqual(result.order_lifecycle_by_exchange["binance"].total_order_count, 1)
+        self.assertEqual(result.order_lifecycle_by_exchange["binance"].filled_count, 1)
+        self.assertAlmostEqual(result.order_lifecycle_by_exchange["binance"].fill_rate, 1.0)
+        self.assertEqual(result.order_lifecycle_by_exchange["okx"].total_order_count, 1)
+        self.assertEqual(result.order_lifecycle_by_exchange["okx"].terminal_count, 1)
+        self.assertEqual(result.order_lifecycle_by_exchange["okx"].canceled_count, 1)
+        self.assertAlmostEqual(result.order_lifecycle_by_exchange["okx"].terminal_rate, 1.0)
+
+    def test_summarizes_order_market_types(self):
+        from quant_platform.backtest import EventDrivenBacktestResult
+        from quant_platform.core import AssetSpec, MarketSpec
+        from quant_platform.portfolio import OrderAction, OrderStatus, PortfolioOrder
+
+        result = EventDrivenBacktestResult(
+            steps=[],
+            markets_by_symbol={
+                "BTC/USDT": MarketSpec(
+                    asset=AssetSpec(symbol="BTC/USDT", base="BTC", quote="USDT"),
+                    exchange="binance",
+                    market_type="swap",
+                ),
+                "AAPL": MarketSpec(
+                    asset=AssetSpec(symbol="AAPL", base="AAPL", quote="USD"),
+                    exchange="nasdaq",
+                    market_type="equity",
+                ),
+            },
+            filled_orders=[
+                PortfolioOrder(
+                    order_id="btc-open",
+                    action=OrderAction.OPEN,
+                    symbol="BTC/USDT",
+                    layer="core",
+                    direction=Direction.LONG,
+                    quantity=10.0,
+                    reason="core long",
+                    status=OrderStatus.FILLED,
+                ),
+            ],
+            terminal_orders=[
+                PortfolioOrder(
+                    order_id="aapl-open",
+                    action=OrderAction.OPEN,
+                    symbol="AAPL",
+                    layer="tactical",
+                    direction=Direction.LONG,
+                    quantity=5.0,
+                    reason="entry_order_expired",
+                    status=OrderStatus.CANCELED,
+                ),
+            ],
+        )
+
+        self.assertEqual(result.order_lifecycle_by_market_type["swap"].total_order_count, 1)
+        self.assertEqual(result.order_lifecycle_by_market_type["swap"].filled_count, 1)
+        self.assertAlmostEqual(result.order_lifecycle_by_market_type["swap"].fill_rate, 1.0)
+        self.assertEqual(result.order_lifecycle_by_market_type["equity"].total_order_count, 1)
+        self.assertEqual(result.order_lifecycle_by_market_type["equity"].terminal_count, 1)
+        self.assertEqual(result.order_lifecycle_by_market_type["equity"].canceled_count, 1)
+        self.assertAlmostEqual(result.order_lifecycle_by_market_type["equity"].terminal_rate, 1.0)
 
     def test_uses_market_spec_fee_multiplier_and_funding_for_accounting(self):
         from quant_platform.backtest import EventDrivenBacktest

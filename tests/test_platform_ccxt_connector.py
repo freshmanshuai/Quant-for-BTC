@@ -6,10 +6,11 @@ class FakeExchange:
         self.batches = list(batches)
         self.calls = []
 
-    def fetch_ohlcv(self, symbol, timeframe, limit, params=None):
+    def fetch_ohlcv(self, symbol, timeframe, since=None, limit=None, params=None):
         self.calls.append({
             "symbol": symbol,
             "timeframe": timeframe,
+            "since": since,
             "limit": limit,
             "params": params or {},
         })
@@ -19,15 +20,22 @@ class FakeExchange:
 
 
 class FakeDerivativeExchange(FakeExchange):
-    def fetch_funding_rate_history(self, symbol, limit):
-        self.calls.append({"method": "funding", "symbol": symbol, "limit": limit})
+    def fetch_funding_rate_history(self, symbol, since=None, limit=None, params=None):
+        self.calls.append({"method": "funding", "symbol": symbol, "since": since, "limit": limit, "params": params or {}})
         return [
             {"timestamp": 1700000000000, "fundingRate": "0.0001"},
             {"timestamp": 1700028800000, "fundingRate": "0.0002"},
         ]
 
-    def fetch_open_interest_history(self, symbol, timeframe, limit):
-        self.calls.append({"method": "open_interest", "symbol": symbol, "timeframe": timeframe, "limit": limit})
+    def fetch_open_interest_history(self, symbol, timeframe, since=None, limit=None, params=None):
+        self.calls.append({
+            "method": "open_interest",
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "since": since,
+            "limit": limit,
+            "params": params or {},
+        })
         return [
             {"timestamp": 1700000000000, "openInterestAmount": "1000"},
             {"timestamp": 1700014400000, "openInterestAmount": "1100"},
@@ -80,6 +88,46 @@ class CcxtConnectorTest(unittest.TestCase):
         self.assertEqual(len(df), 2)
         self.assertEqual(float(df.iloc[-1]["Close"]), 108.0)
         self.assertEqual(str(df.index.tz), "UTC")
+
+    def test_fetch_bars_passes_since_and_filters_configured_window(self):
+        import pandas as pd
+
+        from quant_platform.connectors_ccxt import CcxtExchangeConnector
+        from quant_platform.core import AssetSpec, MarketSpec
+
+        exchange = FakeExchange([
+            [
+                [1700000000000, 100, 110, 90, 105, 1234],
+                [1700003600000, 105, 115, 95, 108, 2345],
+                [1700007200000, 108, 118, 98, 111, 3456],
+                [1700010800000, 111, 121, 101, 114, 4567],
+            ],
+        ])
+        market = MarketSpec(
+            asset=AssetSpec(symbol="BTC/USDT", base="BTC", quote="USDT"),
+            exchange="binance",
+            market_type="swap",
+        )
+        connector = CcxtExchangeConnector(exchange_factory=lambda *_: exchange)
+
+        df = connector.fetch_bars(
+            market,
+            "1h",
+            limit=4,
+            start=pd.Timestamp("2023-11-14T23:13:20Z"),
+            end=pd.Timestamp("2023-11-15T00:13:20Z"),
+        )
+
+        self.assertEqual(exchange.calls[0]["since"], 1700003600000)
+        self.assertEqual(exchange.calls[0]["params"], {"endTime": 1700007200000})
+        self.assertEqual(
+            list(df.index),
+            [
+                pd.Timestamp("2023-11-14T23:13:20Z"),
+                pd.Timestamp("2023-11-15T00:13:20Z"),
+            ],
+        )
+        self.assertEqual(float(df.iloc[-1]["Close"]), 111.0)
 
     def test_binanceus_swap_is_rejected_before_remote_call(self):
         from quant_platform.connectors_ccxt import CcxtExchangeConnector, ConnectorError
@@ -137,6 +185,34 @@ class CcxtConnectorTest(unittest.TestCase):
         self.assertEqual(str(df.index.tz), "UTC")
         self.assertEqual(exchange.calls[0]["method"], "funding")
         self.assertEqual(exchange.calls[1]["method"], "open_interest")
+
+    def test_fetch_derivatives_passes_since_and_filters_configured_window(self):
+        import pandas as pd
+
+        from quant_platform.connectors_ccxt import CcxtExchangeConnector
+        from quant_platform.core import AssetSpec, MarketSpec
+
+        exchange = FakeDerivativeExchange([])
+        market = MarketSpec(
+            asset=AssetSpec(symbol="BTC/USDT", base="BTC", quote="USDT"),
+            exchange="binance",
+            market_type="swap",
+        )
+        connector = CcxtExchangeConnector(exchange_factory=lambda *_: exchange)
+
+        df = connector.fetch_derivatives(
+            market,
+            funding_limit=2,
+            open_interest_timeframe="4h",
+            open_interest_limit=2,
+            start=pd.Timestamp("2023-11-15T00:00:00Z"),
+            end=pd.Timestamp("2023-11-15T00:00:00Z"),
+        )
+
+        self.assertEqual(exchange.calls[0]["since"], 1700006400000)
+        self.assertEqual(exchange.calls[1]["since"], 1700006400000)
+        self.assertEqual(list(df.index), [pd.Timestamp("2023-11-15T00:00:00Z")])
+        self.assertEqual(float(df.iloc[0]["funding_rate"]), 0.0001)
 
     def test_fetch_order_book_snapshots_returns_normalized_depth_frame(self):
         from quant_platform.connectors_ccxt import CcxtExchangeConnector

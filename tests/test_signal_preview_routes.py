@@ -123,7 +123,7 @@ class SignalPreviewRoutesTest(unittest.TestCase):
         }
 
         response = self.client.get(
-            "/api/signals/research-preview?timeframe=1d&symbol=AAPL&exchange=nasdaq&market_type=equity&equity=15000&refresh_features=true&refresh_bars=true"
+            "/api/signals/research-preview?timeframe=1d&symbol=AAPL&exchange=nasdaq&market_type=equity&equity=15000&refresh_features=true&refresh_bars=true&max_exchange_risk=0.03&max_market_type_risk=0.04"
         )
 
         self.assertEqual(response.status_code, 200)
@@ -139,6 +139,8 @@ class SignalPreviewRoutesTest(unittest.TestCase):
         self.assertEqual(kwargs["equity"], 15_000.0)
         self.assertTrue(kwargs["refresh_features"])
         self.assertTrue(kwargs["refresh_bars"])
+        self.assertEqual(kwargs["risk_limits"].max_exchange_risk, 0.03)
+        self.assertEqual(kwargs["risk_limits"].max_market_type_risk, 0.04)
         self.assertNotIn("load_ohlcv", kwargs)
 
     @patch("serve.app.get_signal_research_event_backtest_preview")
@@ -160,7 +162,7 @@ class SignalPreviewRoutesTest(unittest.TestCase):
         }
 
         response = self.client.get(
-            "/api/signals/research-event-backtest-preview?timeframe=1d&symbol=AAPL&exchange=nasdaq&market_type=equity&equity=15000&refresh_features=true&refresh_bars=true&intrabar_entry_limit=true&max_entry_order_age_bars=1&max_exit_order_age_bars=2&max_exit_fill_fraction_per_bar=0.5&max_exit_volume_fraction_per_bar=0.1&entry_spread_feature=order_book_spread&exit_spread_feature=order_book_spread"
+            "/api/signals/research-event-backtest-preview?timeframe=1d&symbol=AAPL&exchange=nasdaq&market_type=equity&equity=15000&refresh_features=true&refresh_bars=true&intrabar_entry_limit=true&intrabar_stop_target=true&fee_rate=0.001&slippage_bps=3&max_entry_order_age_bars=1&max_exit_order_age_bars=2&max_entry_fill_fraction_per_bar=0.25&max_entry_volume_fraction_per_bar=0.2&max_exit_fill_fraction_per_bar=0.5&max_exit_volume_fraction_per_bar=0.1&entry_spread_feature=order_book_spread&exit_spread_feature=order_book_spread&max_exchange_risk=0.03&max_market_type_risk=0.04"
         )
 
         self.assertEqual(response.status_code, 200)
@@ -176,9 +178,16 @@ class SignalPreviewRoutesTest(unittest.TestCase):
         self.assertEqual(kwargs["equity"], 15_000.0)
         self.assertTrue(kwargs["refresh_features"])
         self.assertTrue(kwargs["refresh_bars"])
+        self.assertEqual(kwargs["risk_limits"].max_exchange_risk, 0.03)
+        self.assertEqual(kwargs["risk_limits"].max_market_type_risk, 0.04)
         self.assertTrue(kwargs["execution"].intrabar_entry_limit)
+        self.assertTrue(kwargs["execution"].intrabar_stop_target)
+        self.assertEqual(kwargs["execution"].fee_rate, 0.001)
+        self.assertEqual(kwargs["execution"].slippage_bps, 3.0)
         self.assertEqual(kwargs["execution"].max_entry_order_age_bars, 1)
         self.assertEqual(kwargs["execution"].max_exit_order_age_bars, 2)
+        self.assertEqual(kwargs["execution"].max_entry_fill_fraction_per_bar, 0.25)
+        self.assertEqual(kwargs["execution"].max_entry_volume_fraction_per_bar, 0.2)
         self.assertEqual(kwargs["execution"].max_exit_fill_fraction_per_bar, 0.5)
         self.assertEqual(kwargs["execution"].max_exit_volume_fraction_per_bar, 0.1)
         self.assertEqual(kwargs["execution"].entry_spread_feature, "order_book_spread")

@@ -60,6 +60,84 @@ class SQLiteBarConnectorTest(unittest.TestCase):
         self.assertEqual(float(df.iloc[0]["Close"]), 118.0)
         self.assertEqual(str(df.index.tz), "UTC")
 
+    def test_fetch_bars_preserves_optional_turnover_column(self):
+        from quant_platform.connectors_sqlite import SQLiteBarConnector
+        from quant_platform.core import AssetSpec, MarketSpec
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "market.sqlite"
+            conn = sqlite3.connect(path)
+            try:
+                conn.execute(
+                    """
+                    CREATE TABLE bars (
+                        timestamp TEXT,
+                        open REAL,
+                        high REAL,
+                        low REAL,
+                        close REAL,
+                        volume REAL,
+                        turnover REAL
+                    )
+                    """
+                )
+                conn.execute(
+                    "INSERT INTO bars VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    ("2024-01-01T00:00:00Z", 100, 110, 90, 105, 10, 1050),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            market = MarketSpec(
+                asset=AssetSpec(symbol="BTC/USDT", base="BTC", quote="USDT"),
+                exchange="binance",
+                market_type="swap",
+            )
+
+            df = SQLiteBarConnector(path, tables_by_symbol={"BTC/USDT": "bars"}).fetch_bars(market, "4h")
+
+        self.assertEqual(list(df.columns), ["Open", "High", "Low", "Close", "Volume", "Turnover"])
+        self.assertEqual(float(df.iloc[0]["Turnover"]), 1050.0)
+
+    def test_fetch_bars_maps_quote_volume_alias_to_turnover(self):
+        from quant_platform.connectors_sqlite import SQLiteBarConnector
+        from quant_platform.core import AssetSpec, MarketSpec
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "market.sqlite"
+            conn = sqlite3.connect(path)
+            try:
+                conn.execute(
+                    """
+                    CREATE TABLE bars (
+                        timestamp TEXT,
+                        open REAL,
+                        high REAL,
+                        low REAL,
+                        close REAL,
+                        volume REAL,
+                        quote_asset_volume REAL
+                    )
+                    """
+                )
+                conn.execute(
+                    "INSERT INTO bars VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    ("2024-01-01T00:00:00Z", 100, 110, 90, 105, 10, 1050),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            market = MarketSpec(
+                asset=AssetSpec(symbol="BTC/USDT", base="BTC", quote="USDT"),
+                exchange="binance",
+                market_type="swap",
+            )
+
+            df = SQLiteBarConnector(path, tables_by_symbol={"BTC/USDT": "bars"}).fetch_bars(market, "4h")
+
+        self.assertEqual(list(df.columns), ["Open", "High", "Low", "Close", "Volume", "Turnover"])
+        self.assertEqual(float(df.iloc[0]["Turnover"]), 1050.0)
+
     def test_fetch_bars_reports_missing_symbol_mapping(self):
         from quant_platform.connectors_sqlite import SQLiteConnectorError, SQLiteBarConnector
         from quant_platform.core import AssetSpec, MarketSpec

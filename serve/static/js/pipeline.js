@@ -74,7 +74,9 @@ function formatMarketSession(market) {
   const days = Array.isArray(market.tradingDays) && market.tradingDays.length
     ? market.tradingDays.join(',')
     : 'days n/a';
+  const asset = 'asset ' + [market.base, market.quote].filter(Boolean).join('/');
   const constraints = [
+    asset,
     'tick ' + constraintText(market.tickSize),
     'lot ' + constraintText(market.lotSize),
     'fee ' + rateText(market.feeRate),
@@ -122,6 +124,7 @@ async function loadPipeline() {
   const refreshBars = pipelineChecked('pipeline-refresh-bars');
   const refreshFeatures = pipelineChecked('pipeline-refresh-features');
   const execution = pipelineExecutionSettings();
+  const risk = pipelineRiskSettings();
   const equityInput = document.getElementById('pipeline-equity');
   const equity = Math.max(1, Number(equityInput.value || 10000));
   equityInput.value = String(equity);
@@ -136,6 +139,7 @@ async function loadPipeline() {
       refreshBars,
       refreshFeatures,
       execution,
+      risk,
       equity,
     };
     market.symbol = market.symbols.join(',');
@@ -190,12 +194,30 @@ function pipelineTextValue(id) {
 function pipelineExecutionSettings() {
   return {
     intrabarEntryLimit: pipelineChecked('pipeline-intrabar-entry-limit'),
+    intrabarStopTarget: pipelineChecked('pipeline-intrabar-stop-target'),
+    feeRate: pipelineNumberValue('pipeline-fee-rate'),
+    slippageBps: pipelineNumberValue('pipeline-slippage-bps'),
     maxEntryOrderAgeBars: pipelineNumberValue('pipeline-entry-order-age-bars'),
     maxExitOrderAgeBars: pipelineNumberValue('pipeline-exit-order-age-bars'),
+    maxEntryFillFraction: pipelineNumberValue('pipeline-entry-fill-fraction'),
+    maxEntryVolumeFraction: pipelineNumberValue('pipeline-entry-volume-fraction'),
     maxExitFillFraction: pipelineNumberValue('pipeline-exit-fill-fraction'),
     maxExitVolumeFraction: pipelineNumberValue('pipeline-exit-volume-fraction'),
     entrySpreadFeature: pipelineTextValue('pipeline-entry-spread-feature'),
     exitSpreadFeature: pipelineTextValue('pipeline-exit-spread-feature'),
+  };
+}
+
+function pipelineRiskSettings() {
+  return {
+    riskPerTrade: pipelineNumberValue('pipeline-risk-per-trade'),
+    portfolioRiskBudget: pipelineNumberValue('pipeline-portfolio-risk-budget'),
+    maxSymbolRisk: pipelineNumberValue('pipeline-max-symbol-risk'),
+    maxModuleRisk: pipelineNumberValue('pipeline-max-module-risk'),
+    maxCorrelationGroupRisk: pipelineNumberValue('pipeline-max-correlation-group-risk'),
+    maxExchangeRisk: pipelineNumberValue('pipeline-max-exchange-risk'),
+    maxMarketTypeRisk: pipelineNumberValue('pipeline-max-market-type-risk'),
+    maxDrawdownPct: pipelineNumberValue('pipeline-max-drawdown-pct'),
   };
 }
 
@@ -216,6 +238,7 @@ function pipelineFirstMarket(market) {
     refreshBars: market.refreshBars,
     refreshFeatures: market.refreshFeatures,
     execution: market.execution,
+    risk: market.risk,
     equity: market.equity,
   };
 }
@@ -255,7 +278,8 @@ function pipelineResearchQuery(market) {
     '&exchange=' + encodeURIComponent(market.exchange) +
     '&market_type=' + encodeURIComponent(market.marketType) +
     '&refresh_bars=' + encodeURIComponent(Boolean(market.refreshBars)) +
-    '&refresh_features=' + encodeURIComponent(Boolean(market.refreshFeatures));
+    '&refresh_features=' + encodeURIComponent(Boolean(market.refreshFeatures)) +
+    pipelineRiskQuery(market.risk);
 }
 
 function pipelineExecutionQuery(execution) {
@@ -264,11 +288,26 @@ function pipelineExecutionQuery(execution) {
   if (config.intrabarEntryLimit) {
     params.push('intrabar_entry_limit=true');
   }
+  if (config.intrabarStopTarget) {
+    params.push('intrabar_stop_target=true');
+  }
+  if (config.feeRate !== null && config.feeRate !== undefined) {
+    params.push('fee_rate=' + encodeURIComponent(config.feeRate));
+  }
+  if (config.slippageBps !== null && config.slippageBps !== undefined) {
+    params.push('slippage_bps=' + encodeURIComponent(config.slippageBps));
+  }
   if (config.maxEntryOrderAgeBars !== null && config.maxEntryOrderAgeBars !== undefined) {
     params.push('max_entry_order_age_bars=' + encodeURIComponent(config.maxEntryOrderAgeBars));
   }
   if (config.maxExitOrderAgeBars !== null && config.maxExitOrderAgeBars !== undefined) {
     params.push('max_exit_order_age_bars=' + encodeURIComponent(config.maxExitOrderAgeBars));
+  }
+  if (config.maxEntryFillFraction !== null && config.maxEntryFillFraction !== undefined) {
+    params.push('max_entry_fill_fraction_per_bar=' + encodeURIComponent(config.maxEntryFillFraction));
+  }
+  if (config.maxEntryVolumeFraction !== null && config.maxEntryVolumeFraction !== undefined) {
+    params.push('max_entry_volume_fraction_per_bar=' + encodeURIComponent(config.maxEntryVolumeFraction));
   }
   if (config.maxExitFillFraction !== null && config.maxExitFillFraction !== undefined) {
     params.push('max_exit_fill_fraction_per_bar=' + encodeURIComponent(config.maxExitFillFraction));
@@ -282,6 +321,27 @@ function pipelineExecutionQuery(execution) {
   if (config.exitSpreadFeature) {
     params.push('exit_spread_feature=' + encodeURIComponent(config.exitSpreadFeature));
   }
+  return params.length ? '&' + params.join('&') : '';
+}
+
+function pipelineRiskQuery(risk) {
+  const params = [];
+  const config = risk || {};
+  const fields = [
+    ['risk_per_trade=', config.riskPerTrade],
+    ['portfolio_risk_budget=', config.portfolioRiskBudget],
+    ['max_symbol_risk=', config.maxSymbolRisk],
+    ['max_module_risk=', config.maxModuleRisk],
+    ['max_correlation_group_risk=', config.maxCorrelationGroupRisk],
+    ['max_exchange_risk=', config.maxExchangeRisk],
+    ['max_market_type_risk=', config.maxMarketTypeRisk],
+    ['max_drawdown_pct=', config.maxDrawdownPct],
+  ];
+  fields.forEach(field => {
+    if (field[1] !== null && field[1] !== undefined) {
+      params.push(field[0] + encodeURIComponent(field[1]));
+    }
+  });
   return params.length ? '&' + params.join('&') : '';
 }
 
@@ -385,6 +445,8 @@ function renderPipelineRiskDiagnostics(data) {
   appendRiskBudgetRows(rows, 'Symbol', data.symbols || {});
   appendRiskBudgetRows(rows, 'Module', data.modules || {});
   appendRiskBudgetRows(rows, 'Correlation', data.correlation_groups || {});
+  appendRiskBudgetRows(rows, 'Exchange', data.exchanges || {});
+  appendRiskBudgetRows(rows, 'Market Type', data.market_types || {});
   appendRiskDrawdownRow(rows, data.drawdown || {});
   const shown = rows.slice(0, 60);
   if (!shown.length) {
@@ -477,16 +539,48 @@ function renderPipelineBacktest(data) {
     data.orderModuleCounts || {},
     data.terminalOrderReasonCounts || {}
   );
+  renderPipelineActionLifecycle(data.orderLifecycleByAction || {});
+  renderPipelineModuleLifecycle(data.orderLifecycleByModule || {});
+  renderPipelineSymbolLifecycle(data.orderLifecycleBySymbol || {});
+  renderPipelineLayerLifecycle(data.orderLifecycleByLayer || {});
+  renderPipelineDirectionLifecycle(data.orderLifecycleByDirection || {});
+  renderPipelineCorrelationLifecycle(data.orderLifecycleByCorrelationGroup || {});
+  renderPipelineExchangeLifecycle(data.orderLifecycleByExchange || {});
+  renderPipelineMarketTypeLifecycle(data.orderLifecycleByMarketType || {});
+  renderPipelineOrderLatency(data.orderLatency || [], data.openOrderAges || []);
   renderPipelineAttribution(data.attribution || {});
 }
 
 function renderPipelineBacktestSummary(data) {
   const summary = data.summary || {};
   const exposureSummary = data.exposureSummary || {};
+  const orderLatencySummary = data.orderLatencySummary || {};
+  const openOrderAgeSummary = data.openOrderAgeSummary || {};
+  const orderLifecycleSummary = data.orderLifecycleSummary || {};
   const cards = [
     { label: 'Event Orders', value: String(data.orderCount || 0) },
     { label: 'Filled Orders', value: String(data.filledOrderCount || 0), cls: 'green' },
     { label: 'Terminal Orders', value: String(data.terminalOrderCount || 0), cls: Number(data.terminalOrderCount || 0) > 0 ? 'red' : '' },
+    { label: 'Open Orders', value: String(openOrderAgeSummary.openCount || 0), cls: Number(openOrderAgeSummary.openCount || 0) > 0 ? 'red' : '' },
+    { label: 'Fill Rate', value: pctText(Number(orderLifecycleSummary.fillRate || 0) * 100, 1), cls: Number(orderLifecycleSummary.fillRate || 0) > 0 ? 'green' : '' },
+    { label: 'Open Rate', value: pctText(Number(orderLifecycleSummary.openRate || 0) * 100, 1), cls: Number(orderLifecycleSummary.openRate || 0) > 0 ? 'red' : '' },
+    { label: 'Terminal Rate', value: pctText(Number(orderLifecycleSummary.terminalRate || 0) * 100, 1), cls: Number(orderLifecycleSummary.terminalRate || 0) > 0 ? 'red' : '' },
+    {
+      label: 'Avg Order Wait',
+      value: orderLatencySummary.averageWaitBars == null ? '--' : numberText(orderLatencySummary.averageWaitBars, 1) + ' bars',
+    },
+    {
+      label: 'Max Order Wait',
+      value: orderLatencySummary.maxWaitBars == null ? '--' : numberText(orderLatencySummary.maxWaitBars, 0) + ' bars',
+    },
+    {
+      label: 'Avg Open Age',
+      value: openOrderAgeSummary.averageAgeBars == null ? '--' : numberText(openOrderAgeSummary.averageAgeBars, 1) + ' bars',
+    },
+    {
+      label: 'Max Open Age',
+      value: openOrderAgeSummary.maxAgeBars == null ? '--' : numberText(openOrderAgeSummary.maxAgeBars, 0) + ' bars',
+    },
     { label: 'Event Trades', value: String(data.tradeCount || 0) },
     { label: 'Win Rate', value: pctText(Number(summary.winRate || 0) * 100, 1) },
     { label: 'Avg Trade', value: moneyText(summary.averageTradeNetPnl), cls: Number(summary.averageTradeNetPnl || 0) >= 0 ? 'green' : 'red' },
@@ -497,6 +591,8 @@ function renderPipelineBacktestSummary(data) {
     { label: 'Avg Win', value: summary.averageWinNetPnl == null ? '--' : moneyText(summary.averageWinNetPnl), cls: summary.averageWinNetPnl == null ? '' : 'green' },
     { label: 'Avg Loss', value: summary.averageLossNetPnl == null ? '--' : moneyText(summary.averageLossNetPnl), cls: summary.averageLossNetPnl == null ? '' : 'red' },
     { label: 'Payoff', value: summary.payoffRatio == null ? '--' : numberText(summary.payoffRatio, 2) },
+    { label: 'Trade Notional', value: moneyText(summary.realizedTradeNotional) },
+    { label: 'Turnover', value: pctText(Number(summary.realizedTurnoverRatio || 0) * 100, 1) },
     { label: 'Final Equity', value: moneyText(summary.finalEquity) },
     { label: 'Total Return', value: pctText(Number(summary.totalReturnPct || 0) * 100, 2), cls: Number(summary.totalReturnPct || 0) >= 0 ? 'green' : 'red' },
     {
@@ -504,6 +600,80 @@ function renderPipelineBacktestSummary(data) {
       value: pctText(Number(summary.maxDrawdownPct || 0) * 100, 2),
       cls: Number(summary.maxDrawdownPct || 0) > 0 ? 'red' : 'score-neutral',
       suffix: moneyText(summary.maxDrawdownAmount),
+    },
+    {
+      label: 'Return/DD',
+      value: summary.returnToMaxDrawdown == null ? '--' : numberText(summary.returnToMaxDrawdown, 2),
+      cls: summary.returnToMaxDrawdown == null ? 'score-neutral' : (Number(summary.returnToMaxDrawdown || 0) >= 0 ? 'green' : 'red'),
+    },
+    {
+      label: 'Max DD Duration',
+      value: numberText(summary.maxDrawdownDurationBars, 0) + ' bars',
+      cls: Number(summary.maxDrawdownDurationBars || 0) > 0 ? 'red' : '',
+    },
+    {
+      label: 'Time In DD',
+      value: pctText(Number(summary.timeInDrawdownPct || 0) * 100, 1),
+      cls: Number(summary.timeInDrawdownPct || 0) > 0 ? 'red' : '',
+    },
+    {
+      label: 'Best Event',
+      value: pctText(Number(summary.bestEventReturnPct || 0) * 100, 2),
+      cls: Number(summary.bestEventReturnPct || 0) >= 0 ? 'green' : 'red',
+    },
+    {
+      label: 'Worst Event',
+      value: pctText(Number(summary.worstEventReturnPct || 0) * 100, 2),
+      cls: Number(summary.worstEventReturnPct || 0) >= 0 ? 'green' : 'red',
+    },
+    {
+      label: 'Avg Event',
+      value: pctText(Number(summary.averageEventReturnPct || 0) * 100, 2),
+      cls: Number(summary.averageEventReturnPct || 0) >= 0 ? 'green' : 'red',
+    },
+    {
+      label: 'Event Win',
+      value: pctText(Number(summary.eventReturnWinRate || 0) * 100, 1),
+      cls: Number(summary.eventReturnWinRate || 0) >= 0.5 ? 'green' : 'red',
+      suffix: numberText(summary.positiveEventReturnCount, 0) + '/' + numberText(summary.eventReturnCount, 0),
+    },
+    {
+      label: 'Event Win Streak',
+      value: numberText(summary.maxConsecutivePositiveEventReturns, 0),
+      cls: Number(summary.maxConsecutivePositiveEventReturns || 0) > 0 ? 'green' : 'score-neutral',
+    },
+    {
+      label: 'Event Loss Streak',
+      value: numberText(summary.maxConsecutiveNegativeEventReturns, 0),
+      cls: Number(summary.maxConsecutiveNegativeEventReturns || 0) > 0 ? 'red' : 'score-neutral',
+    },
+    {
+      label: 'Event Payoff',
+      value: summary.eventReturnPayoffRatio == null ? '--' : numberText(summary.eventReturnPayoffRatio, 2),
+      cls: summary.eventReturnPayoffRatio == null ? 'score-neutral' : (Number(summary.eventReturnPayoffRatio || 0) >= 1 ? 'green' : 'red'),
+    },
+    {
+      label: 'Event PF',
+      value: summary.eventReturnProfitFactor == null ? '--' : numberText(summary.eventReturnProfitFactor, 2),
+      cls: summary.eventReturnProfitFactor == null ? 'score-neutral' : (Number(summary.eventReturnProfitFactor || 0) >= 1 ? 'green' : 'red'),
+    },
+    {
+      label: 'Event Vol',
+      value: pctText(Number(summary.eventReturnVolatilityPct || 0) * 100, 2),
+    },
+    {
+      label: 'Event Downside',
+      value: pctText(Number(summary.eventReturnDownsideVolatilityPct || 0) * 100, 2),
+    },
+    {
+      label: 'Event Risk',
+      value: summary.eventReturnRiskRatio == null ? '--' : numberText(summary.eventReturnRiskRatio, 2),
+      cls: summary.eventReturnRiskRatio == null ? 'score-neutral' : (Number(summary.eventReturnRiskRatio || 0) >= 0 ? 'green' : 'red'),
+    },
+    {
+      label: 'Event Sortino',
+      value: summary.eventReturnSortinoRatio == null ? '--' : numberText(summary.eventReturnSortinoRatio, 2),
+      cls: summary.eventReturnSortinoRatio == null ? 'score-neutral' : (Number(summary.eventReturnSortinoRatio || 0) >= 0 ? 'green' : 'red'),
     },
     { label: 'Realized PnL', value: moneyText(summary.realizedPnl), cls: Number(summary.realizedPnl || 0) >= 0 ? 'green' : 'red' },
     { label: 'Fees', value: moneyText(summary.feesPaid) },
@@ -514,6 +684,18 @@ function renderPipelineBacktestSummary(data) {
       value: moneyText(exposureSummary.maxGroupOpenRisk),
       cls: exposureSummary.maxGroupOpenRiskGroup ? '' : 'score-neutral',
       suffix: exposureSummary.maxGroupOpenRiskGroup || '',
+    },
+    {
+      label: 'Max Exchange Risk',
+      value: moneyText(exposureSummary.maxExchangeOpenRisk),
+      cls: exposureSummary.maxExchangeOpenRiskExchange ? '' : 'score-neutral',
+      suffix: exposureSummary.maxExchangeOpenRiskExchange || '',
+    },
+    {
+      label: 'Max Market Type Risk',
+      value: moneyText(exposureSummary.maxMarketTypeOpenRisk),
+      cls: exposureSummary.maxMarketTypeOpenRiskMarketType ? '' : 'score-neutral',
+      suffix: exposureSummary.maxMarketTypeOpenRiskMarketType || '',
     },
     {
       label: 'Max Symbol Risk',
@@ -614,6 +796,215 @@ function pipelineOrderModuleText(module) {
   return 'module:' + String(module || 'unknown');
 }
 
+function renderPipelineActionLifecycle(data) {
+  const tbody = document.getElementById('pipeline-action-lifecycle-rows');
+  if (!tbody) return;
+  const actions = ['open', 'close', 'rebalance', 'transfer', 'ignore'];
+  const rows = actions.map(action => Object.assign({ action }, (data || {})[action] || {}));
+  const shown = rows.filter(row => Number(row.totalOrderCount || 0) > 0).length ? rows : [];
+  if (!shown.length) {
+    tbody.innerHTML = '<tr><td colspan="8">No data</td></tr>';
+    return;
+  }
+  tbody.innerHTML = shown.map(row =>
+    '<tr><td>' + pipelineEscape(row.action) +
+    '</td><td>' + numberText(row.totalOrderCount, 0) +
+    '</td><td>' + numberText(row.filledCount, 0) +
+    '</td><td>' + numberText(row.openCount, 0) +
+    '</td><td>' + numberText(row.terminalCount, 0) +
+    '</td><td>' + pctText(Number(row.fillRate || 0) * 100, 1) +
+    '</td><td>' + pctText(Number(row.openRate || 0) * 100, 1) +
+    '</td><td>' + pctText(Number(row.terminalRate || 0) * 100, 1) + '</td></tr>'
+  ).join('');
+}
+
+function renderPipelineModuleLifecycle(data) {
+  const tbody = document.getElementById('pipeline-module-lifecycle-rows');
+  if (!tbody) return;
+  const rows = Object.keys(data || {}).sort().map(module =>
+    Object.assign({ module }, data[module] || {})
+  );
+  const shown = rows.slice(0, 50);
+  if (!shown.length) {
+    tbody.innerHTML = '<tr><td colspan="8">No data</td></tr>';
+    return;
+  }
+  tbody.innerHTML = shown.map(row =>
+    '<tr><td>' + pipelineEscape(row.module) +
+    '</td><td>' + numberText(row.totalOrderCount, 0) +
+    '</td><td>' + numberText(row.filledCount, 0) +
+    '</td><td>' + numberText(row.openCount, 0) +
+    '</td><td>' + numberText(row.terminalCount, 0) +
+    '</td><td>' + pctText(Number(row.fillRate || 0) * 100, 1) +
+    '</td><td>' + pctText(Number(row.openRate || 0) * 100, 1) +
+    '</td><td>' + pctText(Number(row.terminalRate || 0) * 100, 1) + '</td></tr>'
+  ).join('');
+}
+
+function renderPipelineSymbolLifecycle(data) {
+  const tbody = document.getElementById('pipeline-symbol-lifecycle-rows');
+  if (!tbody) return;
+  const rows = Object.keys(data || {}).sort().map(symbol =>
+    Object.assign({ symbol }, data[symbol] || {})
+  );
+  const shown = rows.slice(0, 50);
+  if (!shown.length) {
+    tbody.innerHTML = '<tr><td colspan="8">No data</td></tr>';
+    return;
+  }
+  tbody.innerHTML = shown.map(row =>
+    '<tr><td>' + pipelineEscape(row.symbol) +
+    '</td><td>' + numberText(row.totalOrderCount, 0) +
+    '</td><td>' + numberText(row.filledCount, 0) +
+    '</td><td>' + numberText(row.openCount, 0) +
+    '</td><td>' + numberText(row.terminalCount, 0) +
+    '</td><td>' + pctText(Number(row.fillRate || 0) * 100, 1) +
+    '</td><td>' + pctText(Number(row.openRate || 0) * 100, 1) +
+    '</td><td>' + pctText(Number(row.terminalRate || 0) * 100, 1) + '</td></tr>'
+  ).join('');
+}
+
+function renderPipelineLayerLifecycle(data) {
+  const tbody = document.getElementById('pipeline-layer-lifecycle-rows');
+  if (!tbody) return;
+  const rows = Object.keys(data || {}).sort().map(layer =>
+    Object.assign({ layer }, data[layer] || {})
+  );
+  const shown = rows.slice(0, 50);
+  if (!shown.length) {
+    tbody.innerHTML = '<tr><td colspan="8">No data</td></tr>';
+    return;
+  }
+  tbody.innerHTML = shown.map(row =>
+    '<tr><td>' + pipelineEscape(row.layer) +
+    '</td><td>' + numberText(row.totalOrderCount, 0) +
+    '</td><td>' + numberText(row.filledCount, 0) +
+    '</td><td>' + numberText(row.openCount, 0) +
+    '</td><td>' + numberText(row.terminalCount, 0) +
+    '</td><td>' + pctText(Number(row.fillRate || 0) * 100, 1) +
+    '</td><td>' + pctText(Number(row.openRate || 0) * 100, 1) +
+    '</td><td>' + pctText(Number(row.terminalRate || 0) * 100, 1) + '</td></tr>'
+  ).join('');
+}
+
+function renderPipelineDirectionLifecycle(data) {
+  const tbody = document.getElementById('pipeline-direction-lifecycle-rows');
+  if (!tbody) return;
+  const rows = Object.keys(data || {}).sort().map(direction =>
+    Object.assign({ direction }, data[direction] || {})
+  );
+  const shown = rows.slice(0, 50);
+  if (!shown.length) {
+    tbody.innerHTML = '<tr><td colspan="8">No data</td></tr>';
+    return;
+  }
+  tbody.innerHTML = shown.map(row =>
+    '<tr><td>' + pipelineEscape(row.direction) +
+    '</td><td>' + numberText(row.totalOrderCount, 0) +
+    '</td><td>' + numberText(row.filledCount, 0) +
+    '</td><td>' + numberText(row.openCount, 0) +
+    '</td><td>' + numberText(row.terminalCount, 0) +
+    '</td><td>' + pctText(Number(row.fillRate || 0) * 100, 1) +
+    '</td><td>' + pctText(Number(row.openRate || 0) * 100, 1) +
+    '</td><td>' + pctText(Number(row.terminalRate || 0) * 100, 1) + '</td></tr>'
+  ).join('');
+}
+
+function renderPipelineCorrelationLifecycle(data) {
+  const tbody = document.getElementById('pipeline-correlation-lifecycle-rows');
+  if (!tbody) return;
+  const rows = Object.keys(data || {}).sort().map(group =>
+    Object.assign({ group }, data[group] || {})
+  );
+  const shown = rows.slice(0, 50);
+  if (!shown.length) {
+    tbody.innerHTML = '<tr><td colspan="8">No data</td></tr>';
+    return;
+  }
+  tbody.innerHTML = shown.map(row =>
+    '<tr><td>' + pipelineEscape(row.group) +
+    '</td><td>' + numberText(row.totalOrderCount, 0) +
+    '</td><td>' + numberText(row.filledCount, 0) +
+    '</td><td>' + numberText(row.openCount, 0) +
+    '</td><td>' + numberText(row.terminalCount, 0) +
+    '</td><td>' + pctText(Number(row.fillRate || 0) * 100, 1) +
+    '</td><td>' + pctText(Number(row.openRate || 0) * 100, 1) +
+    '</td><td>' + pctText(Number(row.terminalRate || 0) * 100, 1) + '</td></tr>'
+  ).join('');
+}
+
+function renderPipelineExchangeLifecycle(data) {
+  const tbody = document.getElementById('pipeline-exchange-lifecycle-rows');
+  if (!tbody) return;
+  const rows = Object.keys(data || {}).sort().map(exchange =>
+    Object.assign({ exchange }, data[exchange] || {})
+  );
+  const shown = rows.slice(0, 50);
+  if (!shown.length) {
+    tbody.innerHTML = '<tr><td colspan="8">No data</td></tr>';
+    return;
+  }
+  tbody.innerHTML = shown.map(row =>
+    '<tr><td>' + pipelineEscape(row.exchange) +
+    '</td><td>' + numberText(row.totalOrderCount, 0) +
+    '</td><td>' + numberText(row.filledCount, 0) +
+    '</td><td>' + numberText(row.openCount, 0) +
+    '</td><td>' + numberText(row.terminalCount, 0) +
+    '</td><td>' + pctText(Number(row.fillRate || 0) * 100, 1) +
+    '</td><td>' + pctText(Number(row.openRate || 0) * 100, 1) +
+    '</td><td>' + pctText(Number(row.terminalRate || 0) * 100, 1) + '</td></tr>'
+  ).join('');
+}
+
+function renderPipelineMarketTypeLifecycle(data) {
+  const tbody = document.getElementById('pipeline-market-type-lifecycle-rows');
+  if (!tbody) return;
+  const rows = Object.keys(data || {}).sort().map(marketType =>
+    Object.assign({ marketType }, data[marketType] || {})
+  );
+  const shown = rows.slice(0, 50);
+  if (!shown.length) {
+    tbody.innerHTML = '<tr><td colspan="8">No data</td></tr>';
+    return;
+  }
+  tbody.innerHTML = shown.map(row =>
+    '<tr><td>' + pipelineEscape(row.marketType) +
+    '</td><td>' + numberText(row.totalOrderCount, 0) +
+    '</td><td>' + numberText(row.filledCount, 0) +
+    '</td><td>' + numberText(row.openCount, 0) +
+    '</td><td>' + numberText(row.terminalCount, 0) +
+    '</td><td>' + pctText(Number(row.fillRate || 0) * 100, 1) +
+    '</td><td>' + pctText(Number(row.openRate || 0) * 100, 1) +
+    '</td><td>' + pctText(Number(row.terminalRate || 0) * 100, 1) + '</td></tr>'
+  ).join('');
+}
+
+function renderPipelineOrderLatency(rows, openRows) {
+  const tbody = document.getElementById('pipeline-order-latency-rows');
+  if (!tbody) return;
+  const normalizedOpenRows = (openRows || []).map(item => Object.assign({}, item, {
+    resolvedBarIndex: item.currentBarIndex,
+    waitBars: item.ageBars,
+  }));
+  const shown = (rows || []).concat(normalizedOpenRows).slice(0, 50);
+  if (!shown.length) {
+    tbody.innerHTML = '<tr><td colspan="8">No data</td></tr>';
+    return;
+  }
+  tbody.innerHTML = shown.map(item => {
+    const status = String(item.status || '');
+    const statusClass = status === 'filled' ? 'score-positive' : (status === 'canceled' || status === 'rejected' ? 'score-negative' : '');
+    return '<tr><td>' + pipelineEscape(item.orderId || '') +
+      '</td><td class="' + statusClass + '">' + pipelineEscape(status) +
+      '</td><td>' + pipelineEscape(item.symbol || '') +
+      '</td><td>' + pipelineEscape(item.layer || '') +
+      '</td><td>' + pipelineEscape(item.module || '') +
+      '</td><td>' + numberText(item.submittedBarIndex, 0) +
+      '</td><td>' + numberText(item.resolvedBarIndex, 0) +
+      '</td><td>' + numberText(item.waitBars, 0) + '</td></tr>';
+  }).join('');
+}
+
 function renderPipelineBacktestTrades(rows) {
   const tbody = document.getElementById('pipeline-backtest-trade-rows');
   const shown = rows.slice(0, 50);
@@ -648,7 +1039,12 @@ function renderPipelineEquity(rows) {
     '<div class="stream-item"><div class="stream-meta">' + pipelineEscape(point.time || '') +
     ' | ' + pipelineEscape(point.symbol || '') + '</div><div class="stream-content">' +
     pipelineEscape('Equity ' + moneyText(point.equity) + ' | Cash ' + moneyText(point.cash) +
-    ' | Unrealized ' + moneyText(point.unrealized_pnl)) + '</div></div>'
+    ' | Peak ' + moneyText(point.equityPeak) +
+    ' | Return ' + pctText(Number(point.returnPct || 0) * 100, 2) +
+    ' | Unrealized ' + moneyText(point.unrealized_pnl) +
+    ' | DD ' + pctText(Number(point.drawdownPct || 0) * 100, 2) +
+    ' ' + moneyText(point.drawdownAmount) +
+    ' | DD Bars ' + numberText(point.drawdownDurationBars, 0)) + '</div></div>'
   ).join('');
 }
 
@@ -671,7 +1067,9 @@ function renderPipelineExposure(rows) {
     ' | Symbols ' + pipelineSymbolExposureText(point.symbolExposure) +
     ' | Layers ' + pipelineLayerExposureText(point.layerExposure) +
     ' | Modules ' + pipelineModuleExposureText(point.moduleExposure) +
-    ' | Groups ' + pipelineGroupExposureText(point.groupExposure)) + '</div></div>'
+    ' | Groups ' + pipelineGroupExposureText(point.groupExposure) +
+    ' | Exchanges ' + pipelineExchangeExposureText(point.exchangeExposure) +
+    ' | Market Types ' + pipelineMarketTypeExposureText(point.marketTypeExposure)) + '</div></div>'
   ).join('');
 }
 
@@ -708,6 +1106,24 @@ function pipelineGroupExposureText(groupExposure) {
   return groups.slice(0, 3).map(group => {
     const exposure = groupExposure[group] || {};
     return group + ' gross ' + moneyText(exposure.grossNotional) + ' risk ' + moneyText(exposure.openRisk);
+  }).join('; ');
+}
+
+function pipelineExchangeExposureText(exchangeExposure) {
+  const exchanges = Object.keys(exchangeExposure || {}).sort();
+  if (!exchanges.length) return '--';
+  return exchanges.slice(0, 3).map(exchange => {
+    const exposure = exchangeExposure[exchange] || {};
+    return exchange + ' gross ' + moneyText(exposure.grossNotional) + ' risk ' + moneyText(exposure.openRisk);
+  }).join('; ');
+}
+
+function pipelineMarketTypeExposureText(marketTypeExposure) {
+  const marketTypes = Object.keys(marketTypeExposure || {}).sort();
+  if (!marketTypes.length) return '--';
+  return marketTypes.slice(0, 3).map(marketType => {
+    const exposure = marketTypeExposure[marketType] || {};
+    return marketType + ' gross ' + moneyText(exposure.grossNotional) + ' risk ' + moneyText(exposure.openRisk);
   }).join('; ');
 }
 
@@ -765,9 +1181,12 @@ function renderPipelineAttribution(data) {
   appendAttributionRows(rows, 'Module', data.byModule || {});
   appendAttributionRows(rows, 'Direction', data.byDirection || {});
   appendAttributionRows(rows, 'Exit', data.byExitReason || {});
+  appendAttributionRows(rows, 'Exchange', data.byExchange || {});
+  appendAttributionRows(rows, 'Market Type', data.byMarketType || {});
+  appendAttributionRows(rows, 'Correlation', data.byCorrelationGroup || {});
   const shown = rows.slice(0, 60);
   if (!shown.length) {
-    tbody.innerHTML = '<tr><td colspan="8">No data</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9">No data</td></tr>';
     return;
   }
   tbody.innerHTML = shown.map(row =>
@@ -775,6 +1194,7 @@ function renderPipelineAttribution(data) {
     '</td><td>' + numberText(row.tradeCount, 0) + '</td><td>' + moneyText(row.netPnl) +
     '</td><td>' + numberText((row.winRate || 0) * 100, 1) + '%</td><td>' +
     pipelineEscape(row.averageHoldingBars == null ? '--' : numberText(row.averageHoldingBars, 1)) +
+    '</td><td>' + moneyText(row.realizedTradeNotional) +
     '</td><td>' + pipelineEscape(row.profitFactor == null ? '--' : numberText(row.profitFactor, 2)) +
     '</td><td>' + pipelineEscape(row.payoffRatio == null ? '--' : numberText(row.payoffRatio, 2)) +
     '</td></tr>'
@@ -935,10 +1355,19 @@ function renderPipelineError(message) {
   document.getElementById('pipeline-backtest-summary-cards').innerHTML =
     '<div class="summary-card"><div class="label">Event Backtest</div><div class="value red">Offline</div></div>';
   document.getElementById('pipeline-backtest-trade-rows').innerHTML = '<tr><td colspan="5">No data</td></tr>';
-  document.getElementById('pipeline-backtest-attribution-rows').innerHTML = '<tr><td colspan="6">No data</td></tr>';
+  document.getElementById('pipeline-backtest-attribution-rows').innerHTML = '<tr><td colspan="9">No data</td></tr>';
   document.getElementById('pipeline-equity-feed').innerHTML = '';
   document.getElementById('pipeline-exposure-feed').innerHTML = '';
   document.getElementById('pipeline-order-status-rows').innerHTML = '<tr><td colspan="2">No data</td></tr>';
+  document.getElementById('pipeline-action-lifecycle-rows').innerHTML = '<tr><td colspan="8">No data</td></tr>';
+  document.getElementById('pipeline-module-lifecycle-rows').innerHTML = '<tr><td colspan="8">No data</td></tr>';
+  document.getElementById('pipeline-symbol-lifecycle-rows').innerHTML = '<tr><td colspan="8">No data</td></tr>';
+  document.getElementById('pipeline-layer-lifecycle-rows').innerHTML = '<tr><td colspan="8">No data</td></tr>';
+  document.getElementById('pipeline-direction-lifecycle-rows').innerHTML = '<tr><td colspan="8">No data</td></tr>';
+  document.getElementById('pipeline-correlation-lifecycle-rows').innerHTML = '<tr><td colspan="8">No data</td></tr>';
+  document.getElementById('pipeline-exchange-lifecycle-rows').innerHTML = '<tr><td colspan="8">No data</td></tr>';
+  document.getElementById('pipeline-market-type-lifecycle-rows').innerHTML = '<tr><td colspan="8">No data</td></tr>';
+  document.getElementById('pipeline-order-latency-rows').innerHTML = '<tr><td colspan="8">No data</td></tr>';
   document.getElementById('pipeline-regime-feed').innerHTML = '<div class="stream-item"><div class="stream-content">No data</div></div>';
   document.getElementById('pipeline-comparison-summary-cards').innerHTML =
     '<div class="summary-card"><div class="label">Migration</div><div class="value red">Offline</div></div>';

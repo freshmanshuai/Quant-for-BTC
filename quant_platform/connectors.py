@@ -35,6 +35,8 @@ class DataConnector(ABC):
         funding_limit: int = 1000,
         open_interest_timeframe: str = "4h",
         open_interest_limit: int = 1000,
+        start: datetime | None = None,
+        end: datetime | None = None,
     ) -> Any:
         """Fetch normalized funding/open-interest data when supported."""
         raise NotImplementedError(f"Data connector {self.name!r} does not support derivative data.")
@@ -95,12 +97,20 @@ class DataConnectorRegistry:
         funding_limit: int = 1000,
         open_interest_timeframe: str = "4h",
         open_interest_limit: int = 1000,
+        start: datetime | None = None,
+        end: datetime | None = None,
     ) -> Any:
+        range_kwargs = {}
+        if start is not None:
+            range_kwargs["start"] = start
+        if end is not None:
+            range_kwargs["end"] = end
         return self.get(source).fetch_derivatives(
             market,
             funding_limit=funding_limit,
             open_interest_timeframe=open_interest_timeframe,
             open_interest_limit=open_interest_limit,
+            **range_kwargs,
         )
 
     def fetch_order_book_snapshots(
@@ -166,6 +176,8 @@ def fetch_derivatives_with_cache(
     funding_limit: int = 1000,
     open_interest_timeframe: str = "4h",
     open_interest_limit: int = 1000,
+    start: datetime | None = None,
+    end: datetime | None = None,
     refresh: bool = False,
 ) -> Any:
     """Fetch derivatives through a DataConnector with a DerivativeStore read/write boundary."""
@@ -178,16 +190,23 @@ def fetch_derivatives_with_cache(
     )
     if not refresh:
         try:
-            return store.read(series_id)
+            return _filter_time_index(store.read(series_id), start=start, end=end)
         except (FileNotFoundError, MissingStorageDependency):
             pass
 
+    range_kwargs = {}
+    if start is not None:
+        range_kwargs["start"] = start
+    if end is not None:
+        range_kwargs["end"] = end
     derivatives = connector.fetch_derivatives(
         market,
         funding_limit=funding_limit,
         open_interest_timeframe=open_interest_timeframe,
         open_interest_limit=open_interest_limit,
+        **range_kwargs,
     )
+    derivatives = _filter_time_index(derivatives, start=start, end=end)
     try:
         store.write(series_id, derivatives)
     except MissingStorageDependency:
@@ -245,13 +264,22 @@ def _filter_bars(
     start: datetime | None = None,
     end: datetime | None = None,
 ) -> Any:
-    frame = bars
+    frame = _filter_time_index(bars, start=start, end=end)
+    if limit is not None:
+        frame = frame.tail(limit)
+    return frame
+
+
+def _filter_time_index(
+    frame: Any,
+    *,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> Any:
     if start is not None:
         frame = frame[frame.index >= _utc_timestamp(start)]
     if end is not None:
         frame = frame[frame.index <= _utc_timestamp(end)]
-    if limit is not None:
-        frame = frame.tail(limit)
     return frame
 
 

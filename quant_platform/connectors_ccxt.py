@@ -46,6 +46,30 @@ def ohlcv_rows_to_frame(rows: list[list]) -> pd.DataFrame:
     return df.set_index("timestamp")
 
 
+def _timestamp_milliseconds(value: datetime) -> int:
+    return int(_utc_timestamp(value).timestamp() * 1000)
+
+
+def _utc_timestamp(value: datetime) -> pd.Timestamp:
+    timestamp = pd.Timestamp(value)
+    if timestamp.tzinfo is None:
+        return timestamp.tz_localize("UTC")
+    return timestamp.tz_convert("UTC")
+
+
+def _filter_time_index(
+    frame: pd.DataFrame,
+    *,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> pd.DataFrame:
+    if start is not None:
+        frame = frame[frame.index >= _utc_timestamp(start)]
+    if end is not None:
+        frame = frame[frame.index <= _utc_timestamp(end)]
+    return frame
+
+
 class CcxtExchangeConnector(DataConnector):
     """Fetch normalized OHLCV bars from a CCXT exchange adapter."""
 
@@ -82,9 +106,6 @@ class CcxtExchangeConnector(DataConnector):
                 "BinanceUS does not support swap (perpetual futures). "
                 "Use market_type='spot' or a futures-capable exchange."
             )
-        if start is not None or end is not None:
-            raise ConnectorError("start/end range fetching is not implemented yet")
-
         config: dict[str, Any] = {"enableRateLimit": True, "timeout": self.timeout_ms}
         if self.proxy_url:
             config["httpsProxy"] = self.proxy_url
@@ -95,10 +116,17 @@ class CcxtExchangeConnector(DataConnector):
         last_error: Exception | None = None
         for attempt in range(1, self.max_retries + 1):
             try:
-                rows = self._fetch_paginated(exchange, market.asset.symbol, timeframe, requested_limit)
+                rows = self._fetch_paginated(
+                    exchange,
+                    market.asset.symbol,
+                    timeframe,
+                    requested_limit,
+                    start=start,
+                    end=end,
+                )
                 if not rows:
                     raise ConnectorError(f"Fetched empty OHLCV dataset from {market.market_key}.")
-                return ohlcv_rows_to_frame(rows)
+                return _filter_time_index(ohlcv_rows_to_frame(rows), start=start, end=end)
             except Exception as exc:
                 last_error = exc
                 if attempt < self.max_retries:
@@ -116,6 +144,8 @@ class CcxtExchangeConnector(DataConnector):
         funding_limit: int = 1000,
         open_interest_timeframe: str = "4h",
         open_interest_limit: int = 1000,
+        start: datetime | None = None,
+        end: datetime | None = None,
     ) -> pd.DataFrame:
         if market.market_type != "swap":
             raise ConnectorError("Derivative data requires a swap/futures market.")
@@ -124,10 +154,19 @@ class CcxtExchangeConnector(DataConnector):
         if self.proxy_url:
             config["httpsProxy"] = self.proxy_url
         exchange = self.exchange_factory(market.exchange, market.market_type, config)
+        since = _timestamp_milliseconds(start) if start is not None else None
+        params: dict[str, Any] = {}
+        if end is not None:
+            params["endTime"] = _timestamp_milliseconds(end)
 
         funding_rows: list[dict[str, Any]] = []
         try:
-            for entry in exchange.fetch_funding_rate_history(market.asset.symbol, limit=funding_limit):
+            funding_kwargs: dict[str, Any] = {"limit": funding_limit}
+            if since is not None:
+                funding_kwargs["since"] = since
+            if params:
+                funding_kwargs["params"] = params
+            for entry in exchange.fetch_funding_rate_history(market.asset.symbol, **funding_kwargs):
                 funding_rows.append({
                     "timestamp": pd.to_datetime(entry["timestamp"], unit="ms", utc=True),
                     "funding_rate": float(entry["fundingRate"]),
@@ -145,7 +184,9 @@ class CcxtExchangeConnector(DataConnector):
             for entry in exchange.fetch_open_interest_history(
                 market.asset.symbol,
                 open_interest_timeframe,
+                since=since,
                 limit=open_interest_limit,
+                params=params,
             ):
                 oi_rows.append({
                     "timestamp": pd.to_datetime(entry["timestamp"], unit="ms", utc=True),
@@ -161,7 +202,7 @@ class CcxtExchangeConnector(DataConnector):
         if funding.empty and open_interest.empty:
             raise ConnectorError(f"No derivative data available for {market.market_key}.")
 
-        return funding.join(open_interest, how="outer").sort_index()
+        return _filter_time_index(funding.join(open_interest, how="outer").sort_index(), start=start, end=end)
 
     def fetch_order_book_snapshots(
         self,
@@ -205,9 +246,20 @@ class CcxtExchangeConnector(DataConnector):
         )
         return pd.DataFrame([row], index=pd.DatetimeIndex([timestamp]))
 
-    def _fetch_paginated(self, exchange, symbol: str, timeframe: str, limit: int) -> list[list]:
+    def _fetch_paginated(
+        self,
+        exchange,
+        symbol: str,
+        timeframe: str,
+        limit: int,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[list]:
+        if start is not None:
+            return self._fetch_paginated_from_start(exchange, symbol, timeframe, limit, start=start, end=end)
+
         all_rows: list[list] = []
-        end_time: int | None = None
+        end_time = _timestamp_milliseconds(end) if end is not None else None
 
         for _ in range(self.max_pages):
             remaining = limit - len(all_rows)
@@ -226,6 +278,50 @@ class CcxtExchangeConnector(DataConnector):
             all_rows = rows + all_rows
             end_time = rows[0][0]
 
+            if len(rows) < batch_limit:
+                break
+
+        return all_rows
+
+    def _fetch_paginated_from_start(
+        self,
+        exchange,
+        symbol: str,
+        timeframe: str,
+        limit: int,
+        *,
+        start: datetime,
+        end: datetime | None = None,
+    ) -> list[list]:
+        all_rows: list[list] = []
+        since = _timestamp_milliseconds(start)
+        end_time = _timestamp_milliseconds(end) if end is not None else None
+
+        for _ in range(self.max_pages):
+            remaining = limit - len(all_rows)
+            if remaining <= 0:
+                break
+
+            batch_limit = min(self.batch_size, remaining)
+            params: dict[str, Any] = {}
+            if end_time is not None:
+                params["endTime"] = end_time
+
+            rows = exchange.fetch_ohlcv(
+                symbol,
+                timeframe=timeframe,
+                since=since,
+                limit=batch_limit,
+                params=params,
+            )
+            if not rows:
+                break
+
+            all_rows.extend(rows)
+            since = int(rows[-1][0]) + 1
+
+            if end_time is not None and int(rows[-1][0]) >= end_time:
+                break
             if len(rows) < batch_limit:
                 break
 

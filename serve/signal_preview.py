@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict
 import json
 from pathlib import Path
@@ -26,25 +26,17 @@ from quant_platform.connectors import (
     fetch_order_book_snapshots_with_cache,
 )
 from quant_platform.core import MarketSpec
-from quant_platform.data import FeatureSeriesId
+from quant_platform.data import ExternalMetricSeriesId, FeatureSeriesId
 from quant_platform.delivery import InMemoryDeliveryChannel
 from quant_platform.features import (
-    BollingerConfig,
-    BollingerFeatureModule,
     DerivativesFeatureModule,
-    DonchianConfig,
-    DonchianFeatureModule,
+    ExternalMetricFeatureConfig,
+    ExternalMetricFeatureModule,
     FeatureEngine,
     FeatureRunResult,
     OrderBookFeatureConfig,
     OrderBookFeatureModule,
-    PriceActionFeatureModule,
-    TechnicalIndicatorConfig,
-    TechnicalIndicatorModule,
-    VolatilityConfig,
-    VolatilityFeatureModule,
-    VolumeConfig,
-    VolumeFeatureModule,
+    default_feature_module_registry,
     run_feature_engine_with_cache,
 )
 from quant_platform.markets import default_crypto_market_catalog, load_market_catalog_json
@@ -75,8 +67,14 @@ from quant_platform.stores import (
     MissingStorageDependency,
     ParquetBarStore,
     ParquetDerivativeStore,
+    ParquetExternalMetricStore,
     ParquetFeatureStore,
     ParquetOrderBookStore,
+    SQLiteBarStore,
+    SQLiteDerivativeStore,
+    SQLiteExternalMetricStore,
+    SQLiteFeatureStore,
+    SQLiteOrderBookStore,
 )
 from serve.data_loader import get_ohlcv, get_summary_stats, get_trade_log
 
@@ -86,6 +84,7 @@ _FEATURE_STORE_DIR = _PROJECT_ROOT / "data" / "features"
 _MARKET_CATALOG_PATH = _PROJECT_ROOT / "config" / "markets.json"
 _REGIME_PROFILE_PATH = _PROJECT_ROOT / "config" / "regime_profiles.json"
 _RESEARCH_DATA_SOURCE_PATH = _PROJECT_ROOT / "config" / "research_data_sources.json"
+_RESEARCH_FEATURE_MODULE_PATH = _PROJECT_ROOT / "config" / "research_feature_modules.json"
 _RESEARCH_SIGNAL_MODULE_PATH = _PROJECT_ROOT / "config" / "research_signal_modules.json"
 
 
@@ -229,6 +228,7 @@ def get_signal_research_preview(
     generate_signals: Callable[[pd.DataFrame, str, MarketSpec, RegimeProfile], list[Signal]] | None = None,
     refresh_bars: bool = False,
     refresh_features: bool = False,
+    risk_limits: RiskLimits | None = None,
 ) -> dict[str, Any]:
     """Run a generic read-only signal research preview for a configured market."""
     market = resolve_market_spec(symbol, exchange=exchange, market_type=market_type)
@@ -281,7 +281,7 @@ def get_signal_research_preview(
     markets_by_symbol = {symbol: market}
     pipeline = SignalPipeline(
         signal_runner=SignalModuleRunner([_FixedSignalModule(signals)]),
-        risk_engine=RiskEngine(RiskLimits()),
+        risk_engine=RiskEngine(risk_limits or RiskLimits()),
         portfolio_engine=PortfolioEngine(),
         delivery_channels=(delivery,),
         markets_by_symbol=markets_by_symbol,
@@ -342,6 +342,19 @@ def get_btc_event_backtest_preview(
             "terminalOrderCount": 0,
             "terminalOrderReasonCounts": {},
             "terminalOrders": [],
+            "orderLatency": [],
+            "orderLatencySummary": _empty_order_latency_summary(),
+            "openOrderAges": [],
+            "openOrderAgeSummary": _empty_open_order_age_summary(),
+            "orderLifecycleSummary": _empty_order_lifecycle_summary(),
+            "orderLifecycleByAction": _empty_order_lifecycle_by_action(),
+            "orderLifecycleByModule": {},
+            "orderLifecycleBySymbol": {},
+            "orderLifecycleByLayer": {},
+            "orderLifecycleByDirection": {},
+            "orderLifecycleByCorrelationGroup": {},
+            "orderLifecycleByExchange": {},
+            "orderLifecycleByMarketType": {},
             "trades": [],
             "equityCurve": [],
             "exposureCurve": [],
@@ -390,6 +403,19 @@ def get_btc_event_backtest_preview(
         "orderStatusCounts": _order_status_counts_to_dict(result.order_status_counts),
         "filledOrders": [_order_to_dict(order) for order in result.filled_orders],
         "terminalOrders": [_order_to_dict(order) for order in result.terminal_orders],
+        "orderLatency": [_order_latency_to_dict(item) for item in result.order_latency],
+        "orderLatencySummary": _order_latency_summary_to_dict(result.order_latency_summary),
+        "openOrderAges": [_open_order_age_to_dict(item) for item in result.open_order_ages],
+        "openOrderAgeSummary": _open_order_age_summary_to_dict(result.open_order_age_summary),
+        "orderLifecycleSummary": _order_lifecycle_summary_to_dict(result.order_lifecycle_summary),
+        "orderLifecycleByAction": _order_lifecycle_by_action_to_dict(result.order_lifecycle_by_action),
+        "orderLifecycleByModule": _order_lifecycle_by_module_to_dict(result.order_lifecycle_by_module),
+        "orderLifecycleBySymbol": _order_lifecycle_by_symbol_to_dict(result.order_lifecycle_by_symbol),
+        "orderLifecycleByLayer": _order_lifecycle_by_layer_to_dict(result.order_lifecycle_by_layer),
+        "orderLifecycleByDirection": _order_lifecycle_by_direction_to_dict(result.order_lifecycle_by_direction),
+        "orderLifecycleByCorrelationGroup": _order_lifecycle_by_correlation_group_to_dict(result.order_lifecycle_by_correlation_group),
+        "orderLifecycleByExchange": _order_lifecycle_by_exchange_to_dict(result.order_lifecycle_by_exchange),
+        "orderLifecycleByMarketType": _order_lifecycle_by_market_type_to_dict(result.order_lifecycle_by_market_type),
         "trades": [_trade_to_dict(trade) for trade in result.trades],
         "equityCurve": [_equity_point_to_dict(point) for point in result.equity_curve],
         "exposureCurve": [_exposure_point_to_dict(point) for point in result.exposure_curve],
@@ -413,6 +439,7 @@ def get_signal_research_event_backtest_preview(
     refresh_bars: bool = False,
     refresh_features: bool = False,
     execution: BacktestExecutionConfig | None = None,
+    risk_limits: RiskLimits | None = None,
 ) -> dict[str, Any]:
     """Run a generic read-only event-driven research backtest for a configured market."""
     market_queries = _research_market_queries(symbol, exchange, market_type)
@@ -427,6 +454,7 @@ def get_signal_research_event_backtest_preview(
             refresh_bars=refresh_bars,
             refresh_features=refresh_features,
             execution=execution,
+            risk_limits=risk_limits,
         )
 
     symbol, exchange, market_type = market_queries[0]
@@ -460,6 +488,19 @@ def get_signal_research_event_backtest_preview(
             "terminalOrderCount": 0,
             "terminalOrderReasonCounts": {},
             "terminalOrders": [],
+            "orderLatency": [],
+            "orderLatencySummary": _empty_order_latency_summary(),
+            "openOrderAges": [],
+            "openOrderAgeSummary": _empty_open_order_age_summary(),
+            "orderLifecycleSummary": _empty_order_lifecycle_summary(),
+            "orderLifecycleByAction": _empty_order_lifecycle_by_action(),
+            "orderLifecycleByModule": {},
+            "orderLifecycleBySymbol": {},
+            "orderLifecycleByLayer": {},
+            "orderLifecycleByDirection": {},
+            "orderLifecycleByCorrelationGroup": {},
+            "orderLifecycleByExchange": {},
+            "orderLifecycleByMarketType": {},
             "trades": [],
             "equityCurve": [],
             "exposureCurve": [],
@@ -493,7 +534,7 @@ def get_signal_research_event_backtest_preview(
     markets_by_symbol = {symbol: market}
     pipeline = SignalPipeline(
         signal_runner=SignalModuleRunner([_CallableSignalModule(signal_generator)]),
-        risk_engine=RiskEngine(RiskLimits()),
+        risk_engine=RiskEngine(risk_limits or RiskLimits()),
         portfolio_engine=PortfolioEngine(),
         markets_by_symbol=markets_by_symbol,
     )
@@ -525,6 +566,19 @@ def get_signal_research_event_backtest_preview(
         "orderStatusCounts": _order_status_counts_to_dict(result.order_status_counts),
         "filledOrders": [_order_to_dict(order) for order in result.filled_orders],
         "terminalOrders": [_order_to_dict(order) for order in result.terminal_orders],
+        "orderLatency": [_order_latency_to_dict(item) for item in result.order_latency],
+        "orderLatencySummary": _order_latency_summary_to_dict(result.order_latency_summary),
+        "openOrderAges": [_open_order_age_to_dict(item) for item in result.open_order_ages],
+        "openOrderAgeSummary": _open_order_age_summary_to_dict(result.open_order_age_summary),
+        "orderLifecycleSummary": _order_lifecycle_summary_to_dict(result.order_lifecycle_summary),
+        "orderLifecycleByAction": _order_lifecycle_by_action_to_dict(result.order_lifecycle_by_action),
+        "orderLifecycleByModule": _order_lifecycle_by_module_to_dict(result.order_lifecycle_by_module),
+        "orderLifecycleBySymbol": _order_lifecycle_by_symbol_to_dict(result.order_lifecycle_by_symbol),
+        "orderLifecycleByLayer": _order_lifecycle_by_layer_to_dict(result.order_lifecycle_by_layer),
+        "orderLifecycleByDirection": _order_lifecycle_by_direction_to_dict(result.order_lifecycle_by_direction),
+        "orderLifecycleByCorrelationGroup": _order_lifecycle_by_correlation_group_to_dict(result.order_lifecycle_by_correlation_group),
+        "orderLifecycleByExchange": _order_lifecycle_by_exchange_to_dict(result.order_lifecycle_by_exchange),
+        "orderLifecycleByMarketType": _order_lifecycle_by_market_type_to_dict(result.order_lifecycle_by_market_type),
         "trades": [_trade_to_dict(trade) for trade in result.trades],
         "equityCurve": [_equity_point_to_dict(point) for point in result.equity_curve],
         "exposureCurve": [_exposure_point_to_dict(point) for point in result.exposure_curve],
@@ -548,6 +602,7 @@ def _get_signal_research_multi_event_backtest_preview(
     refresh_bars: bool,
     refresh_features: bool,
     execution: BacktestExecutionConfig | None,
+    risk_limits: RiskLimits | None,
 ) -> dict[str, Any]:
     markets_by_symbol: dict[str, MarketSpec] = {}
     regimes_by_symbol: dict[str, RegimeProfile] = {}
@@ -600,7 +655,7 @@ def _get_signal_research_multi_event_backtest_preview(
 
     pipeline = SignalPipeline(
         signal_runner=SignalModuleRunner([_CallableSignalModule(signal_generator)]),
-        risk_engine=RiskEngine(RiskLimits()),
+        risk_engine=RiskEngine(risk_limits or RiskLimits()),
         portfolio_engine=PortfolioEngine(),
         markets_by_symbol=markets_by_symbol,
     )
@@ -638,6 +693,19 @@ def _get_signal_research_multi_event_backtest_preview(
         "orderStatusCounts": _order_status_counts_to_dict(result.order_status_counts),
         "filledOrders": [_order_to_dict(order) for order in result.filled_orders],
         "terminalOrders": [_order_to_dict(order) for order in result.terminal_orders],
+        "orderLatency": [_order_latency_to_dict(item) for item in result.order_latency],
+        "orderLatencySummary": _order_latency_summary_to_dict(result.order_latency_summary),
+        "openOrderAges": [_open_order_age_to_dict(item) for item in result.open_order_ages],
+        "openOrderAgeSummary": _open_order_age_summary_to_dict(result.open_order_age_summary),
+        "orderLifecycleSummary": _order_lifecycle_summary_to_dict(result.order_lifecycle_summary),
+        "orderLifecycleByAction": _order_lifecycle_by_action_to_dict(result.order_lifecycle_by_action),
+        "orderLifecycleByModule": _order_lifecycle_by_module_to_dict(result.order_lifecycle_by_module),
+        "orderLifecycleBySymbol": _order_lifecycle_by_symbol_to_dict(result.order_lifecycle_by_symbol),
+        "orderLifecycleByLayer": _order_lifecycle_by_layer_to_dict(result.order_lifecycle_by_layer),
+        "orderLifecycleByDirection": _order_lifecycle_by_direction_to_dict(result.order_lifecycle_by_direction),
+        "orderLifecycleByCorrelationGroup": _order_lifecycle_by_correlation_group_to_dict(result.order_lifecycle_by_correlation_group),
+        "orderLifecycleByExchange": _order_lifecycle_by_exchange_to_dict(result.order_lifecycle_by_exchange),
+        "orderLifecycleByMarketType": _order_lifecycle_by_market_type_to_dict(result.order_lifecycle_by_market_type),
         "trades": [_trade_to_dict(trade) for trade in result.trades],
         "equityCurve": [_equity_point_to_dict(point) for point in result.equity_curve],
         "exposureCurve": [_exposure_point_to_dict(point) for point in result.exposure_curve],
@@ -873,6 +941,16 @@ def _broadcast_query_values(value: str | list[str], expected: int, name: str) ->
     raise ValueError(f"Expected 1 or {expected} {name} values, got {len(values)}.")
 
 
+def _research_bar_store(route: dict[str, Any]):
+    store_type = str(route.get("store_type", "parquet")).strip().lower()
+    root = _PROJECT_ROOT / "data" / "research_bars"
+    if store_type in ("", "parquet"):
+        return ParquetBarStore(root)
+    if store_type == "sqlite":
+        return SQLiteBarStore(root)
+    raise ValueError('Research bar route store_type must be "parquet" or "sqlite".')
+
+
 def load_research_preview_bars(timeframe: str, market: MarketSpec, *, refresh: bool = False) -> pd.DataFrame:
     """Load preview bars through configured project data connectors."""
     if market.asset.symbol == "BTC/USDT" and market.exchange == "binance" and market.market_type == "swap":
@@ -891,14 +969,48 @@ def load_research_preview_bars(timeframe: str, market: MarketSpec, *, refresh: b
     registry = load_data_connector_registry_json(_RESEARCH_DATA_SOURCE_PATH, base_dir=_PROJECT_ROOT)
     bars = fetch_bars_with_cache(
         connector=registry.get(str(source)),
-        store=ParquetBarStore(_PROJECT_ROOT / "data" / "research_bars"),
+        store=_research_bar_store(route),
         source=str(source),
         market=market,
         timeframe=timeframe,
         limit=route.get("limit"),
+        start=_optional_utc_timestamp(route.get("start")),
+        end=_optional_utc_timestamp(route.get("end")),
         refresh=refresh or bool(route.get("refresh", False)),
     )
     return _filter_research_bars_to_market_session(bars, timeframe, market)
+
+
+def _optional_utc_timestamp(value: object | None) -> pd.Timestamp | None:
+    if value in (None, ""):
+        return None
+    timestamp = pd.Timestamp(value)
+    if timestamp.tzinfo is None:
+        return timestamp.tz_localize("UTC")
+    return timestamp.tz_convert("UTC")
+
+
+def _filter_time_index(
+    frame: pd.DataFrame,
+    *,
+    start: pd.Timestamp | None = None,
+    end: pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    if start is not None:
+        frame = frame[frame.index >= start]
+    if end is not None:
+        frame = frame[frame.index <= end]
+    return frame
+
+
+def _research_external_metric_store(route: dict[str, Any]):
+    store_type = str(route.get("store_type", "parquet")).strip().lower()
+    root = _PROJECT_ROOT / "data" / "research_external_metrics"
+    if store_type in ("", "parquet"):
+        return ParquetExternalMetricStore(root)
+    if store_type == "sqlite":
+        return SQLiteExternalMetricStore(root)
+    raise ValueError('Research external metric route store_type must be "parquet" or "sqlite".')
 
 
 def _filter_research_bars_to_market_session(
@@ -915,6 +1027,16 @@ def _filter_research_bars_to_market_session(
 def _is_intraday_timeframe(timeframe: str) -> bool:
     value = str(timeframe).strip().lower()
     return value.endswith("m") or value.endswith("min") or value.endswith("h")
+
+
+def _research_derivative_store(route: dict[str, Any]):
+    store_type = str(route.get("store_type", "parquet")).strip().lower()
+    root = _PROJECT_ROOT / "data" / "research_derivatives"
+    if store_type in ("", "parquet"):
+        return ParquetDerivativeStore(root)
+    if store_type == "sqlite":
+        return SQLiteDerivativeStore(root)
+    raise ValueError('Research derivative route store_type must be "parquet" or "sqlite".')
 
 
 def load_research_preview_derivatives(
@@ -945,14 +1067,39 @@ def load_research_preview_derivatives(
     registry = load_data_connector_registry_json(_RESEARCH_DATA_SOURCE_PATH, base_dir=_PROJECT_ROOT)
     return fetch_derivatives_with_cache(
         connector=registry.get(str(source)),
-        store=ParquetDerivativeStore(_PROJECT_ROOT / "data" / "research_derivatives"),
+        store=_research_derivative_store(route),
         source=str(source),
         market=market,
         funding_limit=int(route.get("funding_limit", 1000)),
         open_interest_timeframe=str(route.get("open_interest_timeframe", timeframe)),
         open_interest_limit=int(route.get("open_interest_limit", 1000)),
+        start=_optional_utc_timestamp(route.get("start")),
+        end=_optional_utc_timestamp(route.get("end")),
         refresh=refresh or bool(route.get("refresh", False)),
     )
+
+
+def _research_order_book_store(route: dict[str, Any]):
+    store_type = str(route.get("store_type", "parquet")).strip().lower()
+    root = _PROJECT_ROOT / "data" / "research_order_books"
+    if store_type in ("", "parquet"):
+        return ParquetOrderBookStore(root)
+    if store_type == "sqlite":
+        return SQLiteOrderBookStore(root)
+    raise ValueError('Research order-book route store_type must be "parquet" or "sqlite".')
+
+
+def _research_feature_store():
+    store_type = "parquet"
+    if _RESEARCH_DATA_SOURCE_PATH.exists():
+        payload = json.loads(_RESEARCH_DATA_SOURCE_PATH.read_text(encoding="utf-8"))
+        store_type = str(payload.get("feature_store_type", store_type)).strip().lower()
+    root = _PROJECT_ROOT / "data" / "research_features"
+    if store_type in ("", "parquet"):
+        return ParquetFeatureStore(root)
+    if store_type == "sqlite":
+        return SQLiteFeatureStore(root)
+    raise ValueError('Research feature_store_type must be "parquet" or "sqlite".')
 
 
 def load_research_preview_order_book(
@@ -982,7 +1129,7 @@ def load_research_preview_order_book(
     registry = load_data_connector_registry_json(_RESEARCH_DATA_SOURCE_PATH, base_dir=_PROJECT_ROOT)
     snapshots = fetch_order_book_snapshots_with_cache(
         connector=registry.get(str(source)),
-        store=ParquetOrderBookStore(_PROJECT_ROOT / "data" / "research_order_books"),
+        store=_research_order_book_store(route),
         source=str(source),
         market=market,
         depth=depth,
@@ -992,6 +1139,59 @@ def load_research_preview_order_book(
     )
     snapshots.attrs["depth"] = depth
     return snapshots
+
+
+def load_research_preview_external_metrics(
+    timeframe: str,
+    market: MarketSpec,
+    *,
+    refresh: bool = False,
+) -> list[pd.DataFrame]:
+    """Load external research metrics such as sentiment, macro, or on-chain frames from storage."""
+    if not _RESEARCH_DATA_SOURCE_PATH.exists():
+        return []
+
+    payload = json.loads(_RESEARCH_DATA_SOURCE_PATH.read_text(encoding="utf-8"))
+    routes = _resolve_research_data_routes(
+        payload.get("routes", []),
+        market,
+        timeframe,
+        data_type="external_metrics",
+    )
+    if not routes:
+        return []
+
+    loaded: list[pd.DataFrame] = []
+    for route in routes:
+        source = route.get("source")
+        provider = route.get("provider")
+        dataset = route.get("dataset")
+        if not source or not provider or not dataset:
+            raise ValueError("Research external metric route requires source, provider, and dataset.")
+
+        series_id = ExternalMetricSeriesId(
+            symbol=market.asset.symbol,
+            provider=str(provider),
+            dataset=str(dataset),
+            timeframe=timeframe,
+            source=str(source),
+        )
+        store = _research_external_metric_store(route)
+        metrics = store.read(series_id)
+        metrics = _filter_time_index(
+            metrics,
+            start=_optional_utc_timestamp(route.get("start")),
+            end=_optional_utc_timestamp(route.get("end")),
+        )
+        prefix = str(route.get("prefix", provider))
+        columns = route.get("columns")
+        if columns is not None:
+            columns = tuple(str(column) for column in columns)
+        metrics.attrs["external_metric_prefix"] = prefix
+        metrics.attrs["external_metric_columns"] = columns
+        metrics.attrs["external_metric_feature_token"] = f"{_feature_set_slug(prefix)}_{_feature_set_slug(str(dataset))}"
+        loaded.append(metrics)
+    return loaded
 
 
 def _load_project_market_catalog():
@@ -1063,25 +1263,12 @@ def _default_research_feature_result(
         order_book = load_research_preview_order_book(timeframe, market, refresh=refresh)
     except (NotImplementedError, MissingStorageDependency, OSError):
         order_book = None
-    modules = [
-        TechnicalIndicatorModule(TechnicalIndicatorConfig(ema_lengths=(regime_profile.trend_ema_length,))),
-        DonchianFeatureModule(DonchianConfig()),
-        VolumeFeatureModule(VolumeConfig()),
-        VolatilityFeatureModule(
-            VolatilityConfig(
-                period=regime_profile.atr_period,
-                adx_period=regime_profile.adx_period,
-                percentile_lookback=regime_profile.regime_lookback,
-            )
-        ),
-        BollingerFeatureModule(
-            BollingerConfig(
-                period=regime_profile.bb_period,
-                std_mult=regime_profile.bb_std_mult,
-            )
-        ),
-        PriceActionFeatureModule(),
-    ]
+    try:
+        external_metrics = load_research_preview_external_metrics(timeframe, market, refresh=refresh)
+    except (NotImplementedError, MissingStorageDependency, OSError):
+        external_metrics = []
+    engine = _research_feature_engine(regime_profile, market=market, timeframe=timeframe)
+    modules = list(engine.modules)
     include_derivatives = derivatives is not None and not derivatives.empty
     if include_derivatives:
         modules.append(DerivativesFeatureModule(derivatives))
@@ -1089,6 +1276,23 @@ def _default_research_feature_result(
     order_book_depth = int(order_book.attrs.get("depth", 5)) if include_order_book else None
     if include_order_book:
         modules.append(OrderBookFeatureModule(order_book, OrderBookFeatureConfig(depth=order_book_depth or 5)))
+    active_external_metrics = [metrics for metrics in external_metrics if not metrics.empty]
+    external_metric_token = "_".join(
+        str(metrics.attrs.get("external_metric_feature_token", ""))
+        for metrics in active_external_metrics
+        if metrics.attrs.get("external_metric_feature_token")
+    )
+    for metrics in active_external_metrics:
+        columns = metrics.attrs.get("external_metric_columns")
+        modules.append(
+            ExternalMetricFeatureModule(
+                metrics,
+                ExternalMetricFeatureConfig(
+                    prefix=str(metrics.attrs.get("external_metric_prefix", "external")),
+                    columns=tuple(columns) if columns else None,
+                ),
+            )
+        )
     engine = FeatureEngine(modules)
     series_id = FeatureSeriesId(
         symbol=market.asset.symbol,
@@ -1098,8 +1302,10 @@ def _default_research_feature_result(
         source="feature_engine",
         feature_set=_default_research_feature_set(
             regime_profile,
+            include_turnover="Turnover" in bars.columns,
             include_derivatives=include_derivatives,
             order_book_depth=order_book_depth,
+            external_metric_token=external_metric_token or None,
         ),
     )
     try:
@@ -1107,18 +1313,130 @@ def _default_research_feature_result(
             engine,
             bars,
             series_id=series_id,
-            store=ParquetFeatureStore(_PROJECT_ROOT / "data" / "research_features"),
+            store=_research_feature_store(),
             refresh=refresh,
         )
     except (MissingStorageDependency, OSError, ValueError):
         return FeatureRunResult(features=engine.run(bars))
 
 
+def _research_feature_engine(
+    regime_profile: RegimeProfile,
+    *,
+    market: MarketSpec,
+    timeframe: str,
+) -> FeatureEngine:
+    records = _configured_research_feature_module_records(
+        regime_profile,
+        market=market,
+        timeframe=timeframe,
+    )
+    if records is None:
+        records = _default_research_feature_module_records(regime_profile)
+    return default_feature_module_registry().build_engine(records)
+
+
+def _default_research_feature_module_records(regime_profile: RegimeProfile) -> list[dict[str, object]]:
+    return [
+        {
+            "type": "technical_indicators",
+            "params": {"ema_lengths": [regime_profile.trend_ema_length]},
+        },
+        {"type": "donchian"},
+        {"type": "volume"},
+        {
+            "type": "volatility",
+            "params": {
+                "period": regime_profile.atr_period,
+                "adx_period": regime_profile.adx_period,
+                "percentile_lookback": regime_profile.regime_lookback,
+            },
+        },
+        {
+            "type": "bollinger",
+            "params": {
+                "period": regime_profile.bb_period,
+                "std_mult": regime_profile.bb_std_mult,
+            },
+        },
+        {"type": "price_action"},
+    ]
+
+
+def _configured_research_feature_module_records(
+    regime_profile: RegimeProfile,
+    *,
+    market: MarketSpec,
+    timeframe: str,
+) -> list[dict[str, object]] | None:
+    if not _RESEARCH_FEATURE_MODULE_PATH.exists():
+        return None
+    payload = json.loads(_RESEARCH_FEATURE_MODULE_PATH.read_text(encoding="utf-8"))
+    module_set_name = _resolve_research_feature_module_set(payload, market, timeframe)
+    if not module_set_name:
+        return None
+    module_sets = {
+        str(record.get("name")): record
+        for record in payload.get("module_sets", [])
+        if record.get("name")
+    }
+    module_set = module_sets.get(str(module_set_name))
+    if module_set is None:
+        raise ValueError(f"Research feature module set not found: {module_set_name}")
+    return _feature_module_records_with_regime_params(module_set.get("modules", []), regime_profile)
+
+
+def _resolve_research_feature_module_set(payload: dict[str, Any], market: MarketSpec, timeframe: str) -> str | None:
+    for route in payload.get("routes", []):
+        if route.get("symbol") != market.asset.symbol:
+            continue
+        if route.get("exchange") != market.exchange:
+            continue
+        if route.get("market_type") != market.market_type:
+            continue
+        route_timeframe = route.get("timeframe")
+        if route_timeframe is not None and route_timeframe != timeframe:
+            continue
+        return route.get("module_set")
+    return payload.get("default_module_set")
+
+
+def _feature_module_records_with_regime_params(
+    records: list[dict[str, Any]],
+    regime_profile: RegimeProfile,
+) -> list[dict[str, object]]:
+    configured: list[dict[str, object]] = []
+    for record in records:
+        module_record = dict(record)
+        params = dict(module_record.get("params") or {})
+        module_record["params"] = _resolve_regime_feature_params(params, regime_profile)
+        configured.append(module_record)
+    return configured
+
+
+def _resolve_regime_feature_params(value: object, regime_profile: RegimeProfile) -> object:
+    if isinstance(value, str) and value.startswith("$regime."):
+        field_name = value.removeprefix("$regime.")
+        if not hasattr(regime_profile, field_name):
+            raise ValueError(f"Unknown regime feature parameter: {field_name}")
+        return getattr(regime_profile, field_name)
+    if isinstance(value, Mapping):
+        return {
+            str(key): _resolve_regime_feature_params(item, regime_profile)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_resolve_regime_feature_params(item, regime_profile) for item in value]
+    return value
+
+
 def _default_research_feature_set(
     regime_profile: RegimeProfile,
     *,
+    include_turnover: bool = False,
     include_derivatives: bool = False,
     order_book_depth: int | None = None,
+    external_metric_token: str | None = None,
 ) -> str:
     feature_set = (
         f"research_default_v1_ema{int(regime_profile.trend_ema_length)}"
@@ -1126,10 +1444,14 @@ def _default_research_feature_set(
         f"_adx{int(regime_profile.adx_period)}"
         f"_bb{int(regime_profile.bb_period)}x{_feature_set_number(regime_profile.bb_std_mult)}"
     )
+    if include_turnover:
+        feature_set += "_turnover"
     if include_derivatives:
         feature_set += "_derivatives"
     if order_book_depth is not None:
         feature_set += f"_order_book_d{int(order_book_depth)}"
+    if external_metric_token:
+        feature_set += f"_external_{_feature_set_slug(external_metric_token)}"
     return feature_set
 
 
@@ -1137,6 +1459,10 @@ def _feature_set_number(value: float) -> str:
     if float(value).is_integer():
         return str(int(value))
     return str(value).replace(".", "p")
+
+
+def _feature_set_slug(value: str) -> str:
+    return "".join(character if character.isalnum() else "_" for character in value).strip("_").lower()
 
 
 def _default_btc_signal_generator(features: pd.DataFrame, symbol: str) -> list[Signal]:
@@ -1230,6 +1556,18 @@ def _resolve_research_data_route(
     *,
     data_type: str = "bars",
 ) -> dict[str, Any] | None:
+    matches = _resolve_research_data_routes(routes, market, timeframe, data_type=data_type)
+    return matches[0] if matches else None
+
+
+def _resolve_research_data_routes(
+    routes: list[dict[str, Any]],
+    market: MarketSpec,
+    timeframe: str,
+    *,
+    data_type: str = "bars",
+) -> list[dict[str, Any]]:
+    matches = []
     for route in routes:
         route_data_type = route.get("data_type", "bars")
         if route_data_type != data_type:
@@ -1243,8 +1581,8 @@ def _resolve_research_data_route(
         route_timeframe = route.get("timeframe")
         if route_timeframe is not None and route_timeframe != timeframe:
             continue
-        return route
-    return None
+        matches.append(route)
+    return matches
 
 
 def _latest_bar(features: pd.DataFrame) -> dict[str, Any] | None:
@@ -1320,6 +1658,170 @@ def _order_to_dict(order: PortfolioOrder) -> dict[str, Any]:
         "stop_price": order.stop_price,
         "target_price": order.target_price,
     }
+
+
+def _order_latency_to_dict(item: Any) -> dict[str, Any]:
+    return {
+        "orderId": item.order_id,
+        "action": item.action.value,
+        "status": item.status.value,
+        "symbol": item.symbol,
+        "layer": item.layer,
+        "module": item.module,
+        "submittedBarIndex": item.submitted_bar_index,
+        "resolvedBarIndex": item.resolved_bar_index,
+        "waitBars": item.wait_bars,
+    }
+
+
+def _order_latency_summary_to_dict(summary: Any) -> dict[str, Any]:
+    return {
+        "resolvedCount": summary.resolved_count,
+        "averageWaitBars": summary.average_wait_bars,
+        "maxWaitBars": summary.max_wait_bars,
+        "filledCount": summary.filled_count,
+        "canceledCount": summary.canceled_count,
+        "rejectedCount": summary.rejected_count,
+    }
+
+
+def _empty_order_latency_summary() -> dict[str, Any]:
+    return {
+        "resolvedCount": 0,
+        "averageWaitBars": None,
+        "maxWaitBars": None,
+        "filledCount": 0,
+        "canceledCount": 0,
+        "rejectedCount": 0,
+    }
+
+
+def _open_order_age_to_dict(item: Any) -> dict[str, Any]:
+    return {
+        "orderId": item.order_id,
+        "action": item.action.value,
+        "status": item.status.value,
+        "symbol": item.symbol,
+        "layer": item.layer,
+        "module": item.module,
+        "submittedBarIndex": item.submitted_bar_index,
+        "currentBarIndex": item.current_bar_index,
+        "ageBars": item.age_bars,
+    }
+
+
+def _open_order_age_summary_to_dict(summary: Any) -> dict[str, Any]:
+    return {
+        "openCount": summary.open_count,
+        "averageAgeBars": summary.average_age_bars,
+        "maxAgeBars": summary.max_age_bars,
+        "submittedCount": summary.submitted_count,
+        "partiallyFilledCount": summary.partially_filled_count,
+    }
+
+
+def _empty_open_order_age_summary() -> dict[str, Any]:
+    return {
+        "openCount": 0,
+        "averageAgeBars": None,
+        "maxAgeBars": None,
+        "submittedCount": 0,
+        "partiallyFilledCount": 0,
+    }
+
+
+def _order_lifecycle_summary_to_dict(summary: Any) -> dict[str, Any]:
+    return {
+        "totalOrderCount": summary.total_order_count,
+        "submittedCount": summary.submitted_count,
+        "partiallyFilledCount": summary.partially_filled_count,
+        "filledCount": summary.filled_count,
+        "canceledCount": summary.canceled_count,
+        "rejectedCount": summary.rejected_count,
+        "resolvedCount": summary.resolved_count,
+        "openCount": summary.open_count,
+        "terminalCount": summary.terminal_count,
+        "fillRate": summary.fill_rate,
+        "openRate": summary.open_rate,
+        "terminalRate": summary.terminal_rate,
+    }
+
+
+def _order_lifecycle_by_action_to_dict(summaries: dict[OrderAction, Any]) -> dict[str, Any]:
+    return {
+        action.value: _order_lifecycle_summary_to_dict(summaries[action])
+        for action in OrderAction
+    }
+
+
+def _order_lifecycle_by_module_to_dict(summaries: dict[str, Any]) -> dict[str, Any]:
+    return {
+        module: _order_lifecycle_summary_to_dict(summary)
+        for module, summary in summaries.items()
+    }
+
+
+def _order_lifecycle_by_symbol_to_dict(summaries: dict[str, Any]) -> dict[str, Any]:
+    return {
+        symbol: _order_lifecycle_summary_to_dict(summary)
+        for symbol, summary in summaries.items()
+    }
+
+
+def _order_lifecycle_by_layer_to_dict(summaries: dict[str, Any]) -> dict[str, Any]:
+    return {
+        layer: _order_lifecycle_summary_to_dict(summary)
+        for layer, summary in summaries.items()
+    }
+
+
+def _order_lifecycle_by_direction_to_dict(summaries: dict[str, Any]) -> dict[str, Any]:
+    return {
+        direction: _order_lifecycle_summary_to_dict(summary)
+        for direction, summary in summaries.items()
+    }
+
+
+def _order_lifecycle_by_correlation_group_to_dict(summaries: dict[str, Any]) -> dict[str, Any]:
+    return {
+        group: _order_lifecycle_summary_to_dict(summary)
+        for group, summary in summaries.items()
+    }
+
+
+def _order_lifecycle_by_exchange_to_dict(summaries: dict[str, Any]) -> dict[str, Any]:
+    return {
+        exchange: _order_lifecycle_summary_to_dict(summary)
+        for exchange, summary in summaries.items()
+    }
+
+
+def _order_lifecycle_by_market_type_to_dict(summaries: dict[str, Any]) -> dict[str, Any]:
+    return {
+        market_type: _order_lifecycle_summary_to_dict(summary)
+        for market_type, summary in summaries.items()
+    }
+
+
+def _empty_order_lifecycle_summary() -> dict[str, Any]:
+    return {
+        "totalOrderCount": 0,
+        "submittedCount": 0,
+        "partiallyFilledCount": 0,
+        "filledCount": 0,
+        "canceledCount": 0,
+        "rejectedCount": 0,
+        "resolvedCount": 0,
+        "openCount": 0,
+        "terminalCount": 0,
+        "fillRate": 0.0,
+        "openRate": 0.0,
+        "terminalRate": 0.0,
+    }
+
+
+def _empty_order_lifecycle_by_action() -> dict[str, Any]:
+    return {action.value: _empty_order_lifecycle_summary() for action in OrderAction}
 
 
 def _position_to_dict(position: Position) -> dict[str, Any]:
@@ -1411,6 +1913,27 @@ def _empty_event_summary(equity: float) -> dict[str, Any]:
         "minEquity": float(equity),
         "maxDrawdownAmount": 0.0,
         "maxDrawdownPct": 0.0,
+        "returnToMaxDrawdown": None,
+        "maxDrawdownDurationBars": 0,
+        "drawdownPointCount": 0,
+        "timeInDrawdownPct": 0.0,
+        "eventReturnCount": 0,
+        "averageEventReturnPct": 0.0,
+        "bestEventReturnPct": 0.0,
+        "worstEventReturnPct": 0.0,
+        "positiveEventReturnCount": 0,
+        "negativeEventReturnCount": 0,
+        "eventReturnWinRate": 0.0,
+        "maxConsecutivePositiveEventReturns": 0,
+        "maxConsecutiveNegativeEventReturns": 0,
+        "averagePositiveEventReturnPct": 0.0,
+        "averageNegativeEventReturnPct": 0.0,
+        "eventReturnPayoffRatio": None,
+        "eventReturnProfitFactor": None,
+        "eventReturnVolatilityPct": 0.0,
+        "eventReturnRiskRatio": None,
+        "eventReturnDownsideVolatilityPct": 0.0,
+        "eventReturnSortinoRatio": None,
         "tradeCount": 0,
         "winRate": 0.0,
         "averageTradeNetPnl": 0.0,
@@ -1421,6 +1944,8 @@ def _empty_event_summary(equity: float) -> dict[str, Any]:
         "averageWinNetPnl": None,
         "averageLossNetPnl": None,
         "payoffRatio": None,
+        "realizedTradeNotional": 0.0,
+        "realizedTurnoverRatio": 0.0,
     }
 
 
@@ -1437,6 +1962,27 @@ def _performance_summary_to_dict(summary) -> dict[str, Any]:
         "minEquity": summary.min_equity,
         "maxDrawdownAmount": summary.max_drawdown_amount,
         "maxDrawdownPct": summary.max_drawdown_pct,
+        "returnToMaxDrawdown": summary.return_to_max_drawdown,
+        "maxDrawdownDurationBars": summary.max_drawdown_duration_bars,
+        "drawdownPointCount": summary.drawdown_point_count,
+        "timeInDrawdownPct": summary.time_in_drawdown_pct,
+        "eventReturnCount": summary.event_return_count,
+        "averageEventReturnPct": summary.average_event_return_pct,
+        "bestEventReturnPct": summary.best_event_return_pct,
+        "worstEventReturnPct": summary.worst_event_return_pct,
+        "positiveEventReturnCount": summary.positive_event_return_count,
+        "negativeEventReturnCount": summary.negative_event_return_count,
+        "eventReturnWinRate": summary.event_return_win_rate,
+        "maxConsecutivePositiveEventReturns": summary.max_consecutive_positive_event_returns,
+        "maxConsecutiveNegativeEventReturns": summary.max_consecutive_negative_event_returns,
+        "averagePositiveEventReturnPct": summary.average_positive_event_return_pct,
+        "averageNegativeEventReturnPct": summary.average_negative_event_return_pct,
+        "eventReturnPayoffRatio": summary.event_return_payoff_ratio,
+        "eventReturnProfitFactor": summary.event_return_profit_factor,
+        "eventReturnVolatilityPct": summary.event_return_volatility_pct,
+        "eventReturnRiskRatio": summary.event_return_risk_ratio,
+        "eventReturnDownsideVolatilityPct": summary.event_return_downside_volatility_pct,
+        "eventReturnSortinoRatio": summary.event_return_sortino_ratio,
         "tradeCount": summary.trade_count,
         "winRate": summary.win_rate,
         "averageTradeNetPnl": summary.average_trade_net_pnl,
@@ -1447,6 +1993,8 @@ def _performance_summary_to_dict(summary) -> dict[str, Any]:
         "averageWinNetPnl": summary.average_win_net_pnl,
         "averageLossNetPnl": summary.average_loss_net_pnl,
         "payoffRatio": summary.payoff_ratio,
+        "realizedTradeNotional": summary.realized_trade_notional,
+        "realizedTurnoverRatio": summary.realized_turnover_ratio,
     }
 
 
@@ -1486,6 +2034,11 @@ def _equity_point_to_dict(point: BacktestEquityPoint) -> dict[str, Any]:
         "cash": point.cash,
         "unrealized_pnl": point.unrealized_pnl,
         "equity": point.equity,
+        "returnPct": point.return_pct,
+        "equityPeak": point.equity_peak,
+        "drawdownAmount": point.drawdown_amount,
+        "drawdownPct": point.drawdown_pct,
+        "drawdownDurationBars": point.drawdown_duration_bars,
     }
 
 
@@ -1516,6 +2069,14 @@ def _exposure_point_to_dict(point: BacktestExposurePoint) -> dict[str, Any]:
             group: _exposure_bucket_to_dict(bucket)
             for group, bucket in point.group_exposure.items()
         },
+        "exchangeExposure": {
+            exchange: _exposure_bucket_to_dict(bucket)
+            for exchange, bucket in point.exchange_exposure.items()
+        },
+        "marketTypeExposure": {
+            market_type: _exposure_bucket_to_dict(bucket)
+            for market_type, bucket in point.market_type_exposure.items()
+        },
     }
 
 
@@ -1544,6 +2105,10 @@ def _exposure_summary_to_dict(summary) -> dict[str, Any]:
         "maxModuleOpenRisk": summary.max_module_open_risk,
         "maxGroupGrossNotional": summary.max_group_gross_notional,
         "maxGroupOpenRisk": summary.max_group_open_risk,
+        "maxExchangeGrossNotional": summary.max_exchange_gross_notional,
+        "maxExchangeOpenRisk": summary.max_exchange_open_risk,
+        "maxMarketTypeGrossNotional": summary.max_market_type_gross_notional,
+        "maxMarketTypeOpenRisk": summary.max_market_type_open_risk,
         "maxSymbolGrossNotionalSymbol": summary.max_symbol_gross_notional_symbol,
         "maxSymbolOpenRiskSymbol": summary.max_symbol_open_risk_symbol,
         "maxLayerGrossNotionalLayer": summary.max_layer_gross_notional_layer,
@@ -1552,6 +2117,10 @@ def _exposure_summary_to_dict(summary) -> dict[str, Any]:
         "maxModuleOpenRiskModule": summary.max_module_open_risk_module,
         "maxGroupGrossNotionalGroup": summary.max_group_gross_notional_group,
         "maxGroupOpenRiskGroup": summary.max_group_open_risk_group,
+        "maxExchangeGrossNotionalExchange": summary.max_exchange_gross_notional_exchange,
+        "maxExchangeOpenRiskExchange": summary.max_exchange_open_risk_exchange,
+        "maxMarketTypeGrossNotionalMarketType": summary.max_market_type_gross_notional_market_type,
+        "maxMarketTypeOpenRiskMarketType": summary.max_market_type_open_risk_market_type,
     }
 
 
@@ -1569,6 +2138,10 @@ def _empty_exposure_summary() -> dict[str, Any]:
         "maxModuleOpenRisk": 0.0,
         "maxGroupGrossNotional": 0.0,
         "maxGroupOpenRisk": 0.0,
+        "maxExchangeGrossNotional": 0.0,
+        "maxExchangeOpenRisk": 0.0,
+        "maxMarketTypeGrossNotional": 0.0,
+        "maxMarketTypeOpenRisk": 0.0,
         "maxSymbolGrossNotionalSymbol": None,
         "maxSymbolOpenRiskSymbol": None,
         "maxLayerGrossNotionalLayer": None,
@@ -1577,6 +2150,10 @@ def _empty_exposure_summary() -> dict[str, Any]:
         "maxModuleOpenRiskModule": None,
         "maxGroupGrossNotionalGroup": None,
         "maxGroupOpenRiskGroup": None,
+        "maxExchangeGrossNotionalExchange": None,
+        "maxExchangeOpenRiskExchange": None,
+        "maxMarketTypeGrossNotionalMarketType": None,
+        "maxMarketTypeOpenRiskMarketType": None,
     }
 
 
@@ -1590,6 +2167,7 @@ def _attribution_to_dict(attribution: BacktestAttribution) -> dict[str, Any]:
                 "feesPaid": bucket.fees_paid,
                 "winCount": bucket.win_count,
                 "winRate": bucket.win_rate,
+                "realizedTradeNotional": bucket.realized_trade_notional,
                 "averageHoldingBars": bucket.average_holding_bars,
                 "grossProfit": bucket.gross_profit,
                 "grossLoss": bucket.gross_loss,
@@ -1607,6 +2185,9 @@ def _attribution_to_dict(attribution: BacktestAttribution) -> dict[str, Any]:
         "byModule": bucket_map(attribution.by_module),
         "byDirection": bucket_map(attribution.by_direction),
         "byExitReason": bucket_map(attribution.by_exit_reason),
+        "byExchange": bucket_map(attribution.by_exchange),
+        "byMarketType": bucket_map(attribution.by_market_type),
+        "byCorrelationGroup": bucket_map(attribution.by_correlation_group),
     }
 
 

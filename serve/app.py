@@ -15,6 +15,7 @@ import pandas as pd
 from flask import Flask, Response, jsonify, request, send_from_directory
 from quant_platform.backtest import BacktestExecutionConfig
 from quant_platform.data import ExternalMetricSeriesId
+from quant_platform.risk import RiskLimits
 from quant_platform.stores import MissingStorageDependency, ParquetExternalMetricStore
 from serve.valuescan_client import ValuescanAPIError, ValuescanClient, ValuescanConfigError
 from serve.valuescan_metrics import cache_valuescan_external_metrics, valuescan_feature_preview_payload
@@ -95,6 +96,22 @@ def create_app():
                 if value:
                     config[name] = value
         return BacktestExecutionConfig(**config) if config else None
+
+    def _risk_limits_arg() -> RiskLimits | None:
+        config: dict[str, float] = {}
+        for name in (
+            "risk_per_trade",
+            "portfolio_risk_budget",
+            "max_symbol_risk",
+            "max_module_risk",
+            "max_correlation_group_risk",
+            "max_exchange_risk",
+            "max_market_type_risk",
+            "max_drawdown_pct",
+        ):
+            if name in request.args:
+                config[name] = float(request.args[name])
+        return RiskLimits(**config) if config else None
 
     def _valuescan_error(exc: Exception, status: int):
         if isinstance(exc, ValuescanConfigError):
@@ -330,16 +347,20 @@ def create_app():
         equity = max(1.0, float(request.args.get("equity", 10_000)))
         refresh_bars = _bool_arg("refresh_bars")
         refresh_features = _bool_arg("refresh_features")
+        risk_limits = _risk_limits_arg()
         try:
-            return jsonify(get_signal_research_preview(
-                timeframe=timeframe,
-                symbol=symbol,
-                exchange=exchange,
-                market_type=market_type,
-                equity=equity,
-                refresh_bars=refresh_bars,
-                refresh_features=refresh_features,
-            ))
+            kwargs = {
+                "timeframe": timeframe,
+                "symbol": symbol,
+                "exchange": exchange,
+                "market_type": market_type,
+                "equity": equity,
+                "refresh_bars": refresh_bars,
+                "refresh_features": refresh_features,
+            }
+            if risk_limits is not None:
+                kwargs["risk_limits"] = risk_limits
+            return jsonify(get_signal_research_preview(**kwargs))
         except ModuleNotFoundError as exc:
             return jsonify({
                 "error": "signal_research_preview_unavailable",
@@ -373,6 +394,7 @@ def create_app():
         refresh_bars = _bool_arg("refresh_bars")
         refresh_features = _bool_arg("refresh_features")
         execution = _event_execution_config_arg()
+        risk_limits = _risk_limits_arg()
         try:
             kwargs = {
                 "timeframe": timeframe,
@@ -385,6 +407,8 @@ def create_app():
             }
             if execution is not None:
                 kwargs["execution"] = execution
+            if risk_limits is not None:
+                kwargs["risk_limits"] = risk_limits
             return jsonify(get_signal_research_event_backtest_preview(**kwargs))
         except ModuleNotFoundError as exc:
             return jsonify({

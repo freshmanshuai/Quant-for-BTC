@@ -126,9 +126,22 @@
           </select>
           <label><input id="pipeline-refresh-bars" type="checkbox"> Refresh bars</label>
           <label><input id="pipeline-refresh-features" type="checkbox"> Refresh features</label>
+          <input id="pipeline-risk-per-trade" inputmode="decimal" aria-label="Risk per trade" placeholder="Risk/trade">
+          <input id="pipeline-portfolio-risk-budget" inputmode="decimal" aria-label="Portfolio risk budget" placeholder="Portfolio risk">
+          <input id="pipeline-max-symbol-risk" inputmode="decimal" aria-label="Max symbol risk" placeholder="Symbol risk">
+          <input id="pipeline-max-module-risk" inputmode="decimal" aria-label="Max module risk" placeholder="Module risk">
+          <input id="pipeline-max-correlation-group-risk" inputmode="decimal" aria-label="Max correlation group risk" placeholder="Group risk">
+          <input id="pipeline-max-exchange-risk" inputmode="decimal" aria-label="Max exchange risk" placeholder="Exchange risk">
+          <input id="pipeline-max-market-type-risk" inputmode="decimal" aria-label="Max market type risk" placeholder="Market type risk">
+          <input id="pipeline-max-drawdown-pct" inputmode="decimal" aria-label="Max drawdown percent" placeholder="Max DD">
           <label><input id="pipeline-intrabar-entry-limit" type="checkbox"> Limit entries</label>
+          <label><input id="pipeline-intrabar-stop-target" type="checkbox"> Stop/target H-L</label>
+          <input id="pipeline-fee-rate" inputmode="decimal" aria-label="Fee rate" placeholder="Fee rate">
+          <input id="pipeline-slippage-bps" inputmode="decimal" aria-label="Slippage bps" placeholder="Slippage bps">
           <input id="pipeline-entry-order-age-bars" inputmode="numeric" aria-label="Entry order age bars" placeholder="Max age">
           <input id="pipeline-exit-order-age-bars" inputmode="numeric" aria-label="Exit order age bars" placeholder="Exit age">
+          <input id="pipeline-entry-fill-fraction" inputmode="decimal" aria-label="Entry fill fraction" placeholder="Entry fill cap">
+          <input id="pipeline-entry-volume-fraction" inputmode="decimal" aria-label="Entry volume fraction" placeholder="Entry volume">
           <input id="pipeline-exit-fill-fraction" inputmode="decimal" aria-label="Exit fill fraction" placeholder="Exit fill cap">
           <input id="pipeline-exit-volume-fraction" inputmode="decimal" aria-label="Exit volume fraction" placeholder="Exit volume">
           <input id="pipeline-entry-spread-feature" aria-label="Entry spread feature" placeholder="Spread feature">
@@ -238,6 +251,87 @@
           </div>
         </div>
         <div class="ai-panel">
+          <div class="panel-title">Event Action Lifecycle</div>
+          <div class="table-wrap compact">
+            <table class="ai-table">
+              <thead><tr><th>Action</th><th>Total</th><th>Filled</th><th>Open</th><th>Terminal</th><th>Fill</th><th>Open</th><th>Terminal</th></tr></thead>
+              <tbody id="pipeline-action-lifecycle-rows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="ai-panel">
+          <div class="panel-title">Event Module Lifecycle</div>
+          <div class="table-wrap compact">
+            <table class="ai-table">
+              <thead><tr><th>Module</th><th>Total</th><th>Filled</th><th>Open</th><th>Terminal</th><th>Fill</th><th>Open</th><th>Terminal</th></tr></thead>
+              <tbody id="pipeline-module-lifecycle-rows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="ai-panel">
+          <div class="panel-title">Event Symbol Lifecycle</div>
+          <div class="table-wrap compact">
+            <table class="ai-table">
+              <thead><tr><th>Symbol</th><th>Total</th><th>Filled</th><th>Open</th><th>Terminal</th><th>Fill</th><th>Open</th><th>Terminal</th></tr></thead>
+              <tbody id="pipeline-symbol-lifecycle-rows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="ai-panel">
+          <div class="panel-title">Event Layer Lifecycle</div>
+          <div class="table-wrap compact">
+            <table class="ai-table">
+              <thead><tr><th>Layer</th><th>Total</th><th>Filled</th><th>Open</th><th>Terminal</th><th>Fill</th><th>Open</th><th>Terminal</th></tr></thead>
+              <tbody id="pipeline-layer-lifecycle-rows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="ai-panel">
+          <div class="panel-title">Event Direction Lifecycle</div>
+          <div class="table-wrap compact">
+            <table class="ai-table">
+              <thead><tr><th>Direction</th><th>Total</th><th>Filled</th><th>Open</th><th>Terminal</th><th>Fill</th><th>Open</th><th>Terminal</th></tr></thead>
+              <tbody id="pipeline-direction-lifecycle-rows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="ai-panel">
+          <div class="panel-title">Event Correlation Lifecycle</div>
+          <div class="table-wrap compact">
+            <table class="ai-table">
+              <thead><tr><th>Group</th><th>Total</th><th>Filled</th><th>Open</th><th>Terminal</th><th>Fill</th><th>Open</th><th>Terminal</th></tr></thead>
+              <tbody id="pipeline-correlation-lifecycle-rows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="ai-panel">
+          <div class="panel-title">Event Exchange Lifecycle</div>
+          <div class="table-wrap compact">
+            <table class="ai-table">
+              <thead><tr><th>Exchange</th><th>Total</th><th>Filled</th><th>Open</th><th>Terminal</th><th>Fill</th><th>Open</th><th>Terminal</th></tr></thead>
+              <tbody id="pipeline-exchange-lifecycle-rows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="ai-panel">
+          <div class="panel-title">Event Market Type Lifecycle</div>
+          <div class="table-wrap compact">
+            <table class="ai-table">
+              <thead><tr><th>Market Type</th><th>Total</th><th>Filled</th><th>Open</th><th>Terminal</th><th>Fill</th><th>Open</th><th>Terminal</th></tr></thead>
+              <tbody id="pipeline-market-type-lifecycle-rows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="ai-panel">
+          <div class="panel-title">Event Order Latency</div>
+          <div class="table-wrap compact">
+            <table class="ai-table">
+              <thead><tr><th>Order</th><th>Status</th><th>Symbol</th><th>Layer</th><th>Module</th><th>Submitted</th><th>Resolved</th><th>Wait</th></tr></thead>
+              <tbody id="pipeline-order-latency-rows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="ai-panel">
           <div class="panel-title">Regime</div>
           <div id="pipeline-regime-feed" class="stream-feed"></div>
         </div>
@@ -248,7 +342,7 @@
           <div class="panel-title">Event Attribution</div>
           <div class="table-wrap compact">
             <table class="ai-table">
-              <thead><tr><th>Group</th><th>Key</th><th>Trades</th><th>Net</th><th>Win</th><th>Hold</th><th>PF</th><th>Payoff</th></tr></thead>
+              <thead><tr><th>Group</th><th>Key</th><th>Trades</th><th>Net</th><th>Win</th><th>Hold</th><th>Notional</th><th>PF</th><th>Payoff</th></tr></thead>
               <tbody id="pipeline-backtest-attribution-rows"></tbody>
             </table>
           </div>

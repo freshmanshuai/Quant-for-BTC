@@ -12,6 +12,9 @@ from quant_platform.connectors import DataConnector
 from quant_platform.core import MarketSpec
 
 
+_TURNOVER_COLUMN_ALIASES = ("turnover", "quotevolume", "quote_volume", "quoteassetvolume", "quote_asset_volume")
+
+
 class SQLiteConnectorError(RuntimeError):
     """Raised when a SQLite connector cannot load requested bars."""
 
@@ -27,11 +30,13 @@ class SQLiteBarConnector(DataConnector):
         tables_by_symbol: dict[str, str],
         timestamp_column: str = "timestamp",
         timeframe_column: str = "timeframe",
+        column_map: dict[str, str] | None = None,
     ):
         self.database_path = Path(database_path)
         self.tables_by_symbol = dict(tables_by_symbol)
         self.timestamp_column = timestamp_column
         self.timeframe_column = timeframe_column
+        self.column_map = _normalize_column_map(column_map or {})
 
     def fetch_bars(
         self,
@@ -73,11 +78,11 @@ class SQLiteBarConnector(DataConnector):
         lower_to_original = {str(column).lower(): column for column in df.columns}
         required = {
             "timestamp": self.timestamp_column.lower(),
-            "Open": "open",
-            "High": "high",
-            "Low": "low",
-            "Close": "close",
-            "Volume": "volume",
+            "Open": self.column_map.get("open", "open"),
+            "High": self.column_map.get("high", "high"),
+            "Low": self.column_map.get("low", "low"),
+            "Close": self.column_map.get("close", "close"),
+            "Volume": self.column_map.get("volume", "volume"),
         }
         missing = [source for source in required.values() if source not in lower_to_original]
         if missing:
@@ -88,6 +93,10 @@ class SQLiteBarConnector(DataConnector):
             if target == "timestamp":
                 continue
             out[target] = pd.to_numeric(df[lower_to_original[source]], errors="coerce").to_numpy()
+        turnover_candidates = _prepend_unique(self.column_map.get("turnover"), _TURNOVER_COLUMN_ALIASES)
+        turnover_source = _first_present_column(lower_to_original, turnover_candidates)
+        if turnover_source is not None:
+            out["Turnover"] = pd.to_numeric(df[turnover_source], errors="coerce").to_numpy()
         timeframe_source = lower_to_original.get(self.timeframe_column.lower())
         if timeframe_source is not None:
             out[self.timeframe_column] = df[timeframe_source].astype(str).to_numpy()
@@ -98,3 +107,20 @@ class SQLiteBarConnector(DataConnector):
     @staticmethod
     def _quote_identifier(identifier: str) -> str:
         return '"' + identifier.replace('"', '""') + '"'
+
+
+def _first_present_column(lower_to_original: dict[str, object], candidates: tuple[str, ...]) -> object | None:
+    for candidate in candidates:
+        if candidate in lower_to_original:
+            return lower_to_original[candidate]
+    return None
+
+
+def _normalize_column_map(column_map: dict[str, str]) -> dict[str, str]:
+    return {str(target).lower(): str(source).lower() for target, source in column_map.items()}
+
+
+def _prepend_unique(first: str | None, rest: tuple[str, ...]) -> tuple[str, ...]:
+    if first is None:
+        return rest
+    return (first, *(candidate for candidate in rest if candidate != first))

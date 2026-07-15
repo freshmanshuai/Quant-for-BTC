@@ -60,6 +60,62 @@ class LocalCsvConnectorTest(unittest.TestCase):
         self.assertEqual(float(df.iloc[0]["Close"]), 118.0)
         self.assertEqual(str(df.index.tz), "UTC")
 
+    def test_fetch_bars_preserves_optional_turnover_column(self):
+        import pandas as pd
+
+        from quant_platform.connectors_csv import LocalCsvConnector
+        from quant_platform.core import AssetSpec, MarketSpec
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "bars.csv"
+            pd.DataFrame([{
+                "timestamp": "2024-01-01T00:00:00Z",
+                "open": 100,
+                "high": 110,
+                "low": 90,
+                "close": 105,
+                "volume": 10,
+                "turnover": 1050,
+            }]).to_csv(path, index=False)
+            market = MarketSpec(
+                asset=AssetSpec(symbol="BTC/USDT", base="BTC", quote="USDT"),
+                exchange="binance",
+                market_type="swap",
+            )
+
+            df = LocalCsvConnector(files_by_symbol={"BTC/USDT": path}).fetch_bars(market, "4h")
+
+        self.assertEqual(list(df.columns), ["Open", "High", "Low", "Close", "Volume", "Turnover"])
+        self.assertEqual(float(df.iloc[0]["Turnover"]), 1050.0)
+
+    def test_fetch_bars_maps_quote_volume_alias_to_turnover(self):
+        import pandas as pd
+
+        from quant_platform.connectors_csv import LocalCsvConnector
+        from quant_platform.core import AssetSpec, MarketSpec
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "bars.csv"
+            pd.DataFrame([{
+                "timestamp": "2024-01-01T00:00:00Z",
+                "open": 100,
+                "high": 110,
+                "low": 90,
+                "close": 105,
+                "volume": 10,
+                "quoteVolume": 1050,
+            }]).to_csv(path, index=False)
+            market = MarketSpec(
+                asset=AssetSpec(symbol="BTC/USDT", base="BTC", quote="USDT"),
+                exchange="binance",
+                market_type="swap",
+            )
+
+            df = LocalCsvConnector(files_by_symbol={"BTC/USDT": path}).fetch_bars(market, "4h")
+
+        self.assertEqual(list(df.columns), ["Open", "High", "Low", "Close", "Volume", "Turnover"])
+        self.assertEqual(float(df.iloc[0]["Turnover"]), 1050.0)
+
     def test_fetch_bars_reports_missing_symbol_mapping(self):
         from quant_platform.connectors_csv import CsvConnectorError, LocalCsvConnector
         from quant_platform.core import AssetSpec, MarketSpec
