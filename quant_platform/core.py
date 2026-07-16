@@ -38,6 +38,9 @@ class MarketSpec:
     supports_short: bool = False
     supports_leverage: bool = False
     max_leverage: float | None = None
+    maintenance_margin_rate: float | None = None
+    maintenance_amount: float = 0.0
+    liquidation_fee_rate: float | None = None
 
     @property
     def market_key(self) -> str:

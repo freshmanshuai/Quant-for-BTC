@@ -9,7 +9,7 @@ import pandas as pd
 from quant_platform.connectors import fetch_derivatives_with_cache
 from quant_platform.connectors_ccxt import CcxtExchangeConnector, ConnectorError
 from quant_platform.core import AssetSpec, MarketSpec
-from quant_platform.data import BarSeriesId, DerivativeSeriesId
+from quant_platform.data import BarSeriesId, DerivativeSeriesId, clean_ohlcv_bars
 from quant_platform.stores import MissingStorageDependency, ParquetBarStore, ParquetDerivativeStore
 
 MarketType = Literal["spot", "swap"]
@@ -22,6 +22,11 @@ _DERIVATIVE_STORE_DIR = _CACHE_DIR / "derivatives"
 
 class DataFetchError(RuntimeError):
     """Raised when remote data fetch fails after retries."""
+
+
+def _clean_bars(bars: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    cleaned = clean_ohlcv_bars(bars, timeframe)
+    return bars if cleaned.equals(bars) else cleaned
 
 
 def _cache_path(
@@ -160,7 +165,7 @@ def fetch_ohlcv(
                 f"[cache] Loaded {len(bars)} bars from Parquet store "
                 f"({bars.index[0].date()} -> {bars.index[-1].date()})"
             )
-            return bars
+            return _clean_bars(bars, timeframe)
 
         cached = _load_cache(cache_path)
         if cached is not None:
@@ -168,7 +173,7 @@ def fetch_ohlcv(
                 f"[cache] Loaded {len(cached)} bars from {cache_path.name} "
                 f"({cached.index[0].date()} ->{cached.index[-1].date()})"
             )
-            return cached
+            return _clean_bars(cached, timeframe)
 
     # Fetch from exchange
     if market_type == "swap":
@@ -176,6 +181,7 @@ def fetch_ohlcv(
             symbol, timeframe, limit,
             market_type, exchange_id, timeout_ms, max_retries, proxy_url,
         )
+        df = _clean_bars(df, timeframe)
         _save_bar_store(series_id, df)
         _save_cache(cache_path, df)
         print(
@@ -190,6 +196,7 @@ def fetch_ohlcv(
             symbol, timeframe, limit,
             market_type, exchange_id, timeout_ms, max_retries, proxy_url,
         )
+        df = _clean_bars(df, timeframe)
         _save_bar_store(series_id, df)
         _save_cache(cache_path, df)
         return df
@@ -201,6 +208,7 @@ def fetch_ohlcv(
             symbol, timeframe, limit,
             "spot", "binanceus", timeout_ms, max_retries, proxy_url,
         )
+        df = _clean_bars(df, timeframe)
         # Cache under the binanceus key so subsequent runs find it
         _save_bar_store(_series_id("binanceus", "spot", symbol, timeframe), df)
         cache_us = _cache_path("binanceus", "spot", symbol, timeframe)

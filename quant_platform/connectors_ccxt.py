@@ -177,7 +177,9 @@ class CcxtExchangeConnector(DataConnector):
         funding = pd.DataFrame(columns=["funding_rate"])
         if funding_rows:
             funding = pd.DataFrame(funding_rows).set_index("timestamp").sort_index()
-            funding = funding.resample(open_interest_timeframe).last().ffill()
+            # Keep only actual settlement timestamps. Forward-filling a funding
+            # rate would charge the same settlement repeatedly in a bar engine.
+            funding = funding.loc[~funding.index.duplicated(keep="last")]
 
         oi_rows: list[dict[str, Any]] = []
         try:

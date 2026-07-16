@@ -1,6 +1,14 @@
 .venv/
+.webvenv/
 .vscode/
+.claude/settings.local.json
+.tmp_*/
 __pycache__/
 *.py[cod]
 .pytest_cache/
-backtest_results/latest/
+backtest_results/
+artifacts/backtests/
+data/*.pkl
+data/bars/
+data/derivatives/
+*.log

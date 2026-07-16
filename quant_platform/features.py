@@ -548,8 +548,16 @@ def macd(close: pd.Series, fast: int, slow: int, signal: int):
 
 
 def htf_ema(close: pd.Series, rule: str, length: int) -> pd.Series:
-    htf_close = close.resample(rule).last().ffill()
-    htf = ema(htf_close, length)
+    """Return an EMA built only from completed higher-timeframe bars.
+
+    A period's final close is not available to base bars inside that same
+    period.  Shifting by one complete period is conservative and makes the
+    output invariant when future rows are appended.
+    """
+    if not isinstance(close.index, pd.DatetimeIndex):
+        raise TypeError("htf_ema requires a DatetimeIndex")
+    completed_close = close.resample(rule).last().shift(1)
+    htf = ema(completed_close, length)
     return htf.reindex(close.index, method="ffill")
 
 

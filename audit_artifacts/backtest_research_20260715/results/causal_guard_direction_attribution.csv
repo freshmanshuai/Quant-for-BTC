@@ -1,0 +1,7 @@
+case_id,asset,strategy,window,roundtrip_cost_bps,direction,trades,pnl,win_rate_pct,profit_factor,avg_win_loss_ratio,max_consecutive_losses,avg_trade_pct
+btc_dual_full_causal_guard_rt8bps,BTC,dual,full_causal_guard,8,long,285,169927.3728686595,46.666666666666664,1.6502794630786437,1.8860336720898785,6,0.8832688913680063
+btc_dual_full_causal_guard_rt8bps,BTC,dual,full_causal_guard,8,short,56,15037.317434332126,50.0,1.5708791234535293,1.5708791234535295,5,1.5545506624401955
+eth_dual_full_causal_guard_rt8bps,ETH,dual,full_causal_guard,8,long,249,212183.31165780468,46.1847389558233,1.3534870062301505,1.5771065985638275,6,1.3607827215766695
+eth_dual_full_causal_guard_rt8bps,ETH,dual,full_causal_guard,8,short,55,9820.757535036575,40.0,1.2183992104984258,1.8275988157476386,5,-0.19218384992808774
+sol_dual_full_causal_guard_rt8bps,SOL,dual,full_causal_guard,8,long,196,410350.9930914298,42.857142857142854,1.333791738554957,1.7783889847399423,9,3.1991525890817876
+sol_dual_full_causal_guard_rt8bps,SOL,dual,full_causal_guard,8,short,46,19993.301233002992,50.0,1.3112650088006512,1.3112650088006512,5,1.0313355644024509

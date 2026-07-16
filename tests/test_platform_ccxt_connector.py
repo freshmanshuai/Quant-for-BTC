@@ -205,13 +205,13 @@ class CcxtConnectorTest(unittest.TestCase):
             funding_limit=2,
             open_interest_timeframe="4h",
             open_interest_limit=2,
-            start=pd.Timestamp("2023-11-15T00:00:00Z"),
-            end=pd.Timestamp("2023-11-15T00:00:00Z"),
+            start=pd.Timestamp(1700000000000, unit="ms", tz="UTC"),
+            end=pd.Timestamp(1700000000000, unit="ms", tz="UTC"),
         )
 
-        self.assertEqual(exchange.calls[0]["since"], 1700006400000)
-        self.assertEqual(exchange.calls[1]["since"], 1700006400000)
-        self.assertEqual(list(df.index), [pd.Timestamp("2023-11-15T00:00:00Z")])
+        self.assertEqual(exchange.calls[0]["since"], 1700000000000)
+        self.assertEqual(exchange.calls[1]["since"], 1700000000000)
+        self.assertEqual(list(df.index), [pd.Timestamp(1700000000000, unit="ms", tz="UTC")])
         self.assertEqual(float(df.iloc[0]["funding_rate"]), 0.0001)
 
     def test_fetch_order_book_snapshots_returns_normalized_depth_frame(self):

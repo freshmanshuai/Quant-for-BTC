@@ -1,0 +1,8 @@
+# Reproduction baseline from the 2026-07-15 audit environment.
+ccxt==4.5.52
+pandas==2.3.3
+numpy==2.2.6
+backtesting==0.6.5
+matplotlib==3.10.9
+flask==2.2.2
+requests==2.33.1

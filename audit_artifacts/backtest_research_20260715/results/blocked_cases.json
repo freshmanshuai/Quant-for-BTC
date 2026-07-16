@@ -1,0 +1,29 @@
+[
+  {
+    "asset": "BTC",
+    "strategy": "htf",
+    "window": "full",
+    "roundtrip_cost_bps": 8,
+    "error_type": "AttributeError",
+    "error": "'HTFStopStrategy' object has no attribute '_USE_REGIME_GATE'",
+    "status": "literal CLI default is not runnable without source-code repair"
+  },
+  {
+    "asset": "ETH",
+    "strategy": "htf",
+    "window": "full",
+    "roundtrip_cost_bps": 8,
+    "error_type": "AttributeError",
+    "error": "'HTFStopStrategy' object has no attribute '_USE_REGIME_GATE'",
+    "status": "literal CLI default is not runnable without source-code repair"
+  },
+  {
+    "asset": "SOL",
+    "strategy": "htf",
+    "window": "full",
+    "roundtrip_cost_bps": 8,
+    "error_type": "AttributeError",
+    "error": "'HTFStopStrategy' object has no attribute '_USE_REGIME_GATE'",
+    "status": "literal CLI default is not runnable without source-code repair"
+  }
+]

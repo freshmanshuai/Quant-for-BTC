@@ -59,6 +59,10 @@ class PortfolioState:
             positions = [position for position in positions if position.symbol == symbol]
         return sum(position.risk_amount for position in positions)
 
+    def open_notional(self) -> float:
+        """Gross entry notional currently consuming initial margin."""
+        return sum(abs(position.notional) for position in self.positions.values())
+
     def positions_for_symbol(self, symbol: str) -> list[Position]:
         return [position for position in self.positions.values() if position.symbol == symbol]
 
@@ -131,6 +135,7 @@ class PortfolioEngine:
         close_on_opposite_signal: bool = False,
         reverse_on_opposite_signal: bool = False,
         transfer_existing_layer: bool = False,
+        precreate_positions: bool = True,
     ):
         self.state = state or PortfolioState()
         self.layer_by_module = dict(layer_by_module or {})
@@ -142,6 +147,7 @@ class PortfolioEngine:
         self.close_on_opposite_signal = close_on_opposite_signal
         self.reverse_on_opposite_signal = reverse_on_opposite_signal
         self.transfer_existing_layer = transfer_existing_layer
+        self.precreate_positions = precreate_positions
         self._next_order_number = len(self.state.orders) + 1
 
     def apply(self, decisions: list[RiskDecision]) -> PortfolioPlan:
@@ -161,7 +167,13 @@ class PortfolioEngine:
                 orders.append(self._ignore(decision, layer, "conflicting_signal_lost"))
                 continue
             existing = self.state.positions.get(key)
+            if existing is None and self._has_pending_entry(key):
+                orders.append(self._ignore(decision, layer, "entry_order_pending"))
+                continue
             if existing is not None:
+                if self._has_pending_exit(key):
+                    orders.append(self._ignore(decision, layer, "exit_order_pending", existing))
+                    continue
                 if self.rebalance_existing and existing.direction == signal.direction:
                     orders.append(self._rebalance(decision, layer, existing))
                     accepted_keys.add(key)
@@ -189,11 +201,33 @@ class PortfolioEngine:
                 orders.append(self._ignore(decision, layer, "symbol_position_limit"))
                 continue
 
-            order = self._open_for_decision(decision, layer)
+            order = self._open_for_decision(
+                decision,
+                layer,
+                precreate_position=self.precreate_positions,
+            )
             accepted_keys.add(key)
             orders.append(order)
 
         return PortfolioPlan(orders=orders)
+
+    def _has_pending_entry(self, key: PositionKey) -> bool:
+        return any(
+            order.symbol == key.symbol
+            and order.layer == key.layer
+            and order.action == OrderAction.OPEN
+            and order.status in {OrderStatus.SUBMITTED, OrderStatus.PARTIALLY_FILLED}
+            for order in self.state.orders.values()
+        )
+
+    def _has_pending_exit(self, key: PositionKey) -> bool:
+        return any(
+            order.symbol == key.symbol
+            and order.layer == key.layer
+            and order.action in {OrderAction.CLOSE, OrderAction.REBALANCE}
+            and order.status in {OrderStatus.SUBMITTED, OrderStatus.PARTIALLY_FILLED}
+            for order in self.state.orders.values()
+        )
 
     def layer_for(self, decision: RiskDecision) -> str:
         return self.layer_by_module.get(decision.signal.module, self.default_layer)

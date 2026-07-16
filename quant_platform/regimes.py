@@ -111,8 +111,8 @@ class RegimeModel:
         weekly_ema = htf_ema(close, cfg.weekly_rule, cfg.trend_ema_length)
         out[f"_d_ema_{cfg.trend_ema_length}"] = daily_ema
         out[f"_w_ema_{cfg.trend_ema_length}"] = weekly_ema
-        out["_d_ema_dir"] = ema_direction(daily_ema, cfg.ema_slope_threshold)
-        out["_w_ema_dir"] = ema_direction(weekly_ema, cfg.ema_slope_threshold)
+        out["_d_ema_dir"] = step_series_direction(daily_ema, cfg.ema_slope_threshold)
+        out["_w_ema_dir"] = step_series_direction(weekly_ema, cfg.ema_slope_threshold)
 
         bb_width = bollinger_width(close, cfg.bb_period, cfg.bb_std_mult)
         bb_pct = rolling_pct_rank(bb_width, cfg.regime_lookback)
@@ -168,6 +168,20 @@ def ema_direction(ema_series: pd.Series, threshold: float = 0.001) -> pd.Series:
         np.where(pct > threshold, 1, np.where(pct < -threshold, -1, 0)),
         index=ema_series.index,
     )
+
+
+def step_series_direction(ema_series: pd.Series, threshold: float = 0.001) -> pd.Series:
+    """Compare distinct HTF observations and carry direction to the next update."""
+    observations = ema_series[ema_series.notna() & ema_series.ne(ema_series.shift(1))]
+    if observations.empty:
+        return pd.Series(0, index=ema_series.index, dtype=int)
+    pct = observations.pct_change(fill_method=None)
+    direction = pd.Series(
+        np.where(pct > threshold, 1, np.where(pct < -threshold, -1, 0)),
+        index=observations.index,
+        dtype=int,
+    )
+    return direction.reindex(ema_series.index, method="ffill").fillna(0).astype(int)
 
 
 def bollinger_width(close: pd.Series, period: int, std_mult: float) -> pd.Series:

@@ -120,6 +120,9 @@ def _market_from_record(record: dict) -> MarketSpec:
         supports_short=bool(record.get("supports_short", False)),
         supports_leverage=bool(record.get("supports_leverage", False)),
         max_leverage=_optional_float(record.get("max_leverage")),
+        maintenance_margin_rate=_optional_float(record.get("maintenance_margin_rate")),
+        maintenance_amount=float(record.get("maintenance_amount", 0.0)),
+        liquidation_fee_rate=_optional_float(record.get("liquidation_fee_rate")),
     )
 
 
@@ -152,6 +155,10 @@ def _market_to_record(market: MarketSpec) -> dict:
     record["supports_short"] = market.supports_short
     record["supports_leverage"] = market.supports_leverage
     _add_optional(record, "max_leverage", market.max_leverage)
+    _add_optional(record, "maintenance_margin_rate", market.maintenance_margin_rate)
+    if market.maintenance_amount:
+        record["maintenance_amount"] = market.maintenance_amount
+    _add_optional(record, "liquidation_fee_rate", market.liquidation_fee_rate)
     return record
 
 

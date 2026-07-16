@@ -24,12 +24,14 @@ class RiskLimits:
     risk_per_trade: float = 0.02
     max_position_fraction: float = 1.0
     max_leverage: float = 1.0
+    enforce_initial_margin: bool = False
     portfolio_risk_budget: float = 0.06
     max_symbol_risk: float | None = None
     max_module_risk: float | None = None
     max_correlation_group_risk: float | None = None
     max_exchange_risk: float | None = None
     max_market_type_risk: float | None = None
+    module_risk_multipliers: dict[str, float] = field(default_factory=dict)
     correlation_groups: dict[str, str] = field(default_factory=dict)
     max_drawdown_pct: float | None = None
     daily_drawdown_limit: float = 0.075
@@ -176,6 +178,7 @@ class RiskEngine:
         entry_price: float,
         bar_index: int = 0,
         open_risk: float = 0.0,
+        open_notional: float = 0.0,
         open_symbol_risk: dict[str, float] | None = None,
         open_module_risk: dict[str, float] | None = None,
         open_group_risk: dict[str, float] | None = None,
@@ -208,18 +211,27 @@ class RiskEngine:
             return self._blocked(signal, "invalid_stop_distance", entry_price=entry_price, stop_price=stop_price)
 
         multiplier = self.state.size_multiplier(self.limits)
-        target_risk = account.equity * self.limits.risk_per_trade * multiplier
+        module_multiplier = float(self.limits.module_risk_multipliers.get(signal.module, 1.0))
+        target_risk = account.equity * self.limits.risk_per_trade * multiplier * module_multiplier
         contract_multiplier = self._contract_multiplier(signal.symbol)
         max_loss_per_unit = stop_distance * contract_multiplier
         raw_quantity = target_risk / max_loss_per_unit
         raw_notional = raw_quantity * entry * contract_multiplier
         max_notional = account.equity * self._effective_notional_cap_multiplier(signal.symbol)
-        notional = min(raw_notional, max_notional)
+        if self.limits.enforce_initial_margin:
+            portfolio_notional_cap = account.equity * self._effective_portfolio_notional_cap_multiplier(
+                signal.symbol
+            )
+            available_notional = max(0.0, portfolio_notional_cap - float(open_notional))
+        else:
+            available_notional = float("inf")
+        notional = min(raw_notional, max_notional, available_notional)
         quantity = notional / (entry * contract_multiplier)
         risk_amount = quantity * max_loss_per_unit
 
         if quantity <= 0:
-            return self._blocked(signal, "zero_quantity", entry_price=entry, stop_price=stop_price)
+            reason = "initial_margin_exhausted" if available_notional <= 0 else "zero_quantity"
+            return self._blocked(signal, reason, entry_price=entry, stop_price=stop_price)
 
         portfolio_budget = account.equity * self.limits.portfolio_risk_budget
         if open_risk + risk_amount > portfolio_budget:
@@ -349,6 +361,17 @@ class RiskEngine:
             )
             return self.limits.max_position_fraction * min(self.limits.max_leverage, market_leverage)
         return min(self.limits.max_position_fraction, self.limits.max_leverage)
+
+    def _effective_portfolio_notional_cap_multiplier(self, symbol: str) -> float:
+        market = self.markets_by_symbol.get(symbol)
+        if market is not None and not market.supports_leverage:
+            return 1.0
+        market_leverage = (
+            market.max_leverage
+            if market is not None and market.max_leverage is not None
+            else self.limits.max_leverage
+        )
+        return min(self.limits.max_leverage, market_leverage)
 
     def _contract_multiplier(self, symbol: str) -> float:
         market = self.markets_by_symbol.get(symbol)

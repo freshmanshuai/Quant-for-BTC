@@ -59,6 +59,7 @@ class SignalPipeline:
         signals = self._prioritize_signals(self.signal_runner.generate(features, symbol=symbol))
         risk_decisions: list[RiskDecision] = []
         open_risk = self.portfolio_engine.state.open_risk()
+        open_notional = self.portfolio_engine.state.open_notional()
         open_symbol_risk = self.portfolio_engine.state.open_symbol_risk()
         open_module_risk = self.portfolio_engine.state.open_module_risk()
         open_group_risk = self.portfolio_engine.state.open_group_risk(
@@ -75,6 +76,7 @@ class SignalPipeline:
                 entry_price=price,
                 bar_index=bar_index,
                 open_risk=open_risk,
+                open_notional=open_notional,
                 open_symbol_risk=open_symbol_risk,
                 open_module_risk=open_module_risk,
                 open_group_risk=open_group_risk,
@@ -84,6 +86,7 @@ class SignalPipeline:
             risk_decisions.append(decision)
             if decision.allowed:
                 open_risk += decision.risk_amount
+                open_notional += decision.notional
                 open_symbol_risk[signal.symbol] = open_symbol_risk.get(signal.symbol, 0.0) + decision.risk_amount
                 open_module_risk[signal.module] = open_module_risk.get(signal.module, 0.0) + decision.risk_amount
                 group = self.risk_engine.correlation_group_for_symbol(signal.symbol)

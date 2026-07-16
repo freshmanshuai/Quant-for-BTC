@@ -1,0 +1,98 @@
+[
+  {
+    "case": "raw_with_duplicates",
+    "deduplicated": false,
+    "source_4h": "data\\binance_swap_BTC_USDT_4h.pkl",
+    "source_15m": "data\\binance_swap_BTC_USDT_15m.pkl",
+    "source_4h_sha256": "4a4130fd657eb9a58d13ab50a0f7888458bacab77758099744b6fb22dd9ce951",
+    "source_15m_sha256": "fd9a0782ea6af33e82b2ea14f01e31a3e81dc006e6c5e776a26e6b0183a73a2f",
+    "bars_4h": 14670,
+    "bars_15m": 100000,
+    "duplicate_4h": 14,
+    "duplicate_15m": 99,
+    "derivative_bonus": 0,
+    "roundtrip_cost_bps": 8,
+    "elapsed_seconds": 33.374693393707275,
+    "metrics": {
+      "Start": "2019-09-08 20:00:00+00:00",
+      "End": "2026-05-17 04:00:00+00:00",
+      "Return [%]": 302.8219752449761,
+      "Return (Ann.) [%]": 23.131969792425842,
+      "Max. Drawdown [%]": -18.655722895550642,
+      "Max. Drawdown Duration": "672 days 12:00:00",
+      "Sharpe Ratio": 1.2291284787934964,
+      "Sortino Ratio": 2.472176210971019,
+      "Calmar Ratio": 1.239939611128271,
+      "# Trades": 464,
+      "Win Rate [%]": 44.18103448275862,
+      "Profit Factor": 1.557215883154541,
+      "Equity Final [$]": 402821.9752449761
+    },
+    "trade_diagnostics": {
+      "raw_trade_count": 464,
+      "material_trade_count": 346,
+      "ghost_count": 118,
+      "ghost_pct": 25.43103448275862,
+      "material_size_threshold": 1e-07,
+      "adjacent_interval_overlap_count": 133,
+      "any_interval_overlap_count": 133
+    },
+    "material_trade_stats": {
+      "trades": 346,
+      "pnl": 302821.9758105532,
+      "win_rate_pct": 48.554913294797686,
+      "profit_factor": 1.9840349338156353,
+      "avg_win_loss_ratio": 2.102132251304661,
+      "max_consecutive_losses": 7,
+      "avg_trade_pct": 1.3929639831708656
+    }
+  },
+  {
+    "case": "deduplicated_keep_last",
+    "deduplicated": true,
+    "source_4h": "data\\binance_swap_BTC_USDT_4h.pkl",
+    "source_15m": "data\\binance_swap_BTC_USDT_15m.pkl",
+    "source_4h_sha256": "4a4130fd657eb9a58d13ab50a0f7888458bacab77758099744b6fb22dd9ce951",
+    "source_15m_sha256": "fd9a0782ea6af33e82b2ea14f01e31a3e81dc006e6c5e776a26e6b0183a73a2f",
+    "bars_4h": 14656,
+    "bars_15m": 99901,
+    "duplicate_4h": 0,
+    "duplicate_15m": 0,
+    "derivative_bonus": 0,
+    "roundtrip_cost_bps": 8,
+    "elapsed_seconds": 33.73239040374756,
+    "metrics": {
+      "Start": "2019-09-08 20:00:00+00:00",
+      "End": "2026-05-17 04:00:00+00:00",
+      "Return [%]": 306.89753373031834,
+      "Return (Ann.) [%]": 23.31722702938295,
+      "Max. Drawdown [%]": -18.65572287291355,
+      "Max. Drawdown Duration": "646 days 12:00:00",
+      "Sharpe Ratio": 1.224380237443595,
+      "Sortino Ratio": 2.4659198162646287,
+      "Calmar Ratio": 1.249869929362935,
+      "# Trades": 461,
+      "Win Rate [%]": 44.03470715835141,
+      "Profit Factor": 1.5530176115333651,
+      "Equity Final [$]": 406897.53373031836
+    },
+    "trade_diagnostics": {
+      "raw_trade_count": 461,
+      "material_trade_count": 343,
+      "ghost_count": 118,
+      "ghost_pct": 25.59652928416486,
+      "material_size_threshold": 1e-07,
+      "adjacent_interval_overlap_count": 134,
+      "any_interval_overlap_count": 134
+    },
+    "material_trade_stats": {
+      "trades": 343,
+      "pnl": 306897.53428173205,
+      "win_rate_pct": 48.10495626822158,
+      "profit_factor": 1.981180583392657,
+      "avg_win_loss_ratio": 2.1372735990538967,
+      "max_consecutive_losses": 7,
+      "avg_trade_pct": 1.3882751810207545
+    }
+  }
+]

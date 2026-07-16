@@ -1,0 +1,43 @@
+{
+  "strategy": "retained_expert_system_v1",
+  "classification": "rule_based_expert_system",
+  "retained_modules": {
+    "core_long": {"layer": "core", "risk_multiplier": 1.0},
+    "bear_core": {"layer": "core", "risk_multiplier": 0.5},
+    "pullback_long": {"layer": "tactical", "risk_multiplier": 0.35}
+  },
+  "disabled_modules": [
+    "breakout",
+    "sweep_short",
+    "dip_buy",
+    "sweep_long",
+    "core_add",
+    "meanrev",
+    "bulltrap",
+    "failed_bounce",
+    "crash",
+    "derivative_bonus",
+    "manual_score"
+  ],
+  "execution_defaults": {
+    "venue": "binance",
+    "market_type": "swap",
+    "fee_mode": "taker",
+    "taker_fee_rate": 0.0005,
+    "slippage_bps": 2.0,
+    "signal_price": "close",
+    "fill_price": "next_open",
+    "funding": "historical_settlement_ledger_required",
+    "margin_mode": "isolated",
+    "enforce_initial_margin": true,
+    "maintenance_margin_rate": 0.004,
+    "maintenance_amount": 0.0,
+    "liquidation_fee_rate": 0.0125
+  },
+  "parameter_as_of": "2026-07-16",
+  "notes": [
+    "Fee and risk-tier values must be overridden with the account and symbol's actual Binance settings.",
+    "Slippage is an explicit conservative model input, not an exchange constant.",
+    "The canonical runner fails closed when the funding ledger does not cover the bar window."
+  ]
+}

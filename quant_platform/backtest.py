@@ -55,6 +55,18 @@ class BacktestExecutionConfig:
     max_exit_order_age_bars: int | None = None
     entry_spread_feature: str | None = None
     exit_spread_feature: str | None = None
+    fill_price_column: str = "Close"
+    min_order_age_bars: int = 0
+    funding_rate_feature: str | None = None
+    funding_mark_price_feature: str | None = None
+    leverage: float = 1.0
+    maintenance_margin_rate: float = 0.0
+    maintenance_amount: float = 0.0
+    liquidation_fee_rate: float = 0.0
+    mark_price_column: str | None = None
+    mark_high_column: str | None = None
+    mark_low_column: str | None = None
+    finalize_positions: bool = False
 
 
 @dataclass(frozen=True)
@@ -72,6 +84,9 @@ class BacktestEquityPoint:
     drawdown_amount: float = 0.0
     drawdown_pct: float = 0.0
     drawdown_duration_bars: int = 0
+    initial_margin_used: float = 0.0
+    maintenance_margin: float = 0.0
+    available_margin: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -212,6 +227,7 @@ class BacktestTrade:
     entry_bar_index: int | None = None
     exit_bar_index: int | None = None
     holding_bars: int | None = None
+    liquidation_fee: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -340,6 +356,11 @@ class EventDrivenBacktestResult:
     realized_pnl: float = 0.0
     fees_paid: float = 0.0
     funding_paid: float = 0.0
+    liquidation_fees_paid: float = 0.0
+
+    @property
+    def liquidation_count(self) -> int:
+        return sum(trade.exit_reason == "liquidation" for trade in self.trades)
 
     @property
     def signals(self) -> list[Signal]:
@@ -993,6 +1014,7 @@ class EventDrivenBacktest:
         realized_pnl = 0.0
         fees_paid = 0.0
         funding_paid = 0.0
+        liquidation_fees_paid = 0.0
 
         for symbol, features in features_by_symbol.items():
             if features.empty:
@@ -1003,9 +1025,12 @@ class EventDrivenBacktest:
             last_bar_by_symbol[symbol] = bar_index
             features = features_by_symbol[symbol]
             window = features.iloc[: bar_index + 1]
-            fill_price = float(window["Close"].iloc[-1]) if "Close" in window.columns else None
-            if fill_price is not None:
-                latest_prices[symbol] = fill_price
+            current_bar = window.iloc[-1]
+            signal_price = float(current_bar["Close"]) if "Close" in window.columns else None
+            fill_column = self.execution.fill_price_column
+            fill_price = float(current_bar[fill_column]) if fill_column in window.columns else signal_price
+            if signal_price is not None:
+                latest_prices[symbol] = signal_price
             account = self._account_with_equity(
                 self._equity_point(symbol, timestamp, bar_index, cash, latest_prices).equity
             )
@@ -1013,7 +1038,7 @@ class EventDrivenBacktest:
                 window,
                 symbol=symbol,
                 account=account,
-                entry_price=fill_price,
+                entry_price=signal_price,
                 bar_index=bar_index,
             )
             steps.append(BacktestStep(symbol=symbol, timestamp=timestamp, bar_index=bar_index, result=result))
@@ -1023,7 +1048,9 @@ class EventDrivenBacktest:
             submitted_fills, submitted_entry_fees = self._fill_submitted_orders(
                 event_orders,
                 fill_price,
-                window.iloc[-1],
+                current_bar,
+                order_first_seen_bar,
+                bar_index,
             )
             event_fills.extend(submitted_fills)
             filled_orders.extend(event_fills)
@@ -1039,10 +1066,18 @@ class EventDrivenBacktest:
             event_fees = submitted_entry_fees
             fees_paid += event_fees
             cash -= event_fees
-            event_funding = self._funding_for_symbol(symbol)
+            event_funding = self._funding_for_symbol(symbol, current_bar)
             funding_paid += event_funding
             cash -= event_funding
             event_trades = self._trades_from_event_fills(event_fills, timestamp, bar_index)
+            event_trades.extend(
+                self._close_liquidated_positions(
+                    symbol,
+                    current_bar,
+                    timestamp,
+                    bar_index,
+                )
+            )
             event_trades.extend(
                 self._close_triggered_positions(
                     symbol,
@@ -1056,10 +1091,12 @@ class EventDrivenBacktest:
             trades.extend(event_trades)
             self._record_risk_trade_feedback(event_trades, bar_index)
             exit_fees = sum(trade.exit_fee for trade in event_trades)
+            event_liquidation_fees = sum(trade.liquidation_fee for trade in event_trades)
             event_realized = sum(trade.gross_pnl for trade in event_trades)
             realized_pnl += event_realized
-            fees_paid += exit_fees
-            cash += event_realized - exit_fees
+            fees_paid += exit_fees + event_liquidation_fees
+            liquidation_fees_paid += event_liquidation_fees
+            cash += event_realized - exit_fees - event_liquidation_fees
             state_history.append(self._snapshot(symbol, timestamp, bar_index))
             equity_point = self._equity_point(symbol, timestamp, bar_index, cash, latest_prices)
             if equity_point.equity >= equity_peak:
@@ -1081,6 +1118,47 @@ class EventDrivenBacktest:
             previous_equity = equity_point.equity
             exposure_curve.append(self._exposure_point(symbol, timestamp, bar_index, latest_prices))
 
+        if self.execution.finalize_positions and events:
+            final_timestamp, final_symbol, final_bar_index = sorted(
+                events, key=lambda event: (event[0], event[1])
+            )[-1]
+            final_orders, final_trades = self._finalize_open_positions(
+                latest_prices,
+                final_timestamp,
+                final_bar_index,
+            )
+            filled_orders.extend(final_orders)
+            trades.extend(final_trades)
+            final_realized = sum(trade.gross_pnl for trade in final_trades)
+            final_fees = sum(trade.exit_fee for trade in final_trades)
+            realized_pnl += final_realized
+            fees_paid += final_fees
+            cash += final_realized - final_fees
+            if final_trades:
+                point = self._equity_point(
+                    final_symbol,
+                    final_timestamp,
+                    final_bar_index,
+                    cash,
+                    latest_prices,
+                )
+                equity_peak = max(equity_peak, point.equity)
+                drawdown_amount = equity_peak - point.equity
+                equity_curve.append(
+                    replace(
+                        point,
+                        return_pct=(point.equity - previous_equity) / previous_equity
+                        if previous_equity
+                        else 0.0,
+                        equity_peak=equity_peak,
+                        drawdown_amount=drawdown_amount,
+                        drawdown_pct=drawdown_amount / equity_peak if equity_peak else 0.0,
+                        drawdown_duration_bars=(
+                            equity_drawdown_duration_bars + 1 if drawdown_amount > 0 else 0
+                        ),
+                    )
+                )
+
         open_order_ages = self._open_order_ages(order_first_seen_bar, last_bar_by_symbol)
 
         return EventDrivenBacktestResult(
@@ -1098,6 +1176,7 @@ class EventDrivenBacktest:
             realized_pnl=realized_pnl,
             fees_paid=fees_paid,
             funding_paid=funding_paid,
+            liquidation_fees_paid=liquidation_fees_paid,
         )
 
     def _event_submitted_orders(self, symbol: str, current_orders: list[PortfolioOrder]) -> list[PortfolioOrder]:
@@ -1191,6 +1270,8 @@ class EventDrivenBacktest:
         orders: list[PortfolioOrder],
         fill_price: float | None,
         current_bar: pd.Series,
+        order_first_seen_bar: dict[str, int] | None = None,
+        bar_index: int = 0,
     ) -> tuple[list[PortfolioOrder], float]:
         if fill_price is None:
             return [], 0.0
@@ -1200,6 +1281,9 @@ class EventDrivenBacktest:
             if order.action not in {OrderAction.OPEN, OrderAction.CLOSE, OrderAction.REBALANCE}:
                 continue
             if order.status not in {OrderStatus.SUBMITTED, OrderStatus.PARTIALLY_FILLED} or not order.order_id:
+                continue
+            first_seen = (order_first_seen_bar or {}).get(order.order_id, bar_index)
+            if bar_index - first_seen < self.execution.min_order_age_bars:
                 continue
             execution_price = self._submitted_order_execution_price(order, fill_price, current_bar)
             if execution_price is None:
@@ -1525,6 +1609,126 @@ class EventDrivenBacktest:
             self._clear_entry_metadata_if_closed(order)
         return trades
 
+    def _finalize_open_positions(
+        self,
+        latest_prices: Mapping[str, float],
+        timestamp: object,
+        bar_index: int,
+    ) -> tuple[list[PortfolioOrder], list[BacktestTrade]]:
+        orders: list[PortfolioOrder] = []
+        trades: list[BacktestTrade] = []
+        for position in list(self.pipeline.portfolio_engine.state.positions.values()):
+            mark = latest_prices.get(position.symbol)
+            if mark is None:
+                continue
+            exit_price = self._execution_price(mark, self._exit_direction(position.direction))
+            order = self.pipeline.portfolio_engine.close_position(
+                position.symbol,
+                position.layer,
+                fill_price=exit_price,
+                reason="end_of_data",
+            )
+            orders.append(order)
+            trades.append(self._trade_from_close(order, "end_of_data", timestamp, bar_index))
+            self._clear_entry_metadata_if_closed(order)
+        return orders, trades
+
+    def _close_liquidated_positions(
+        self,
+        symbol: str,
+        current_bar: pd.Series,
+        timestamp: object,
+        bar_index: int,
+    ) -> list[BacktestTrade]:
+        """Liquidate positions whose adverse mark breaches maintenance margin."""
+        trades: list[BacktestTrade] = []
+        positions = [
+            position
+            for position in list(self.pipeline.portfolio_engine.state.positions.values())
+            if position.symbol == symbol
+        ]
+        for position in positions:
+            liquidation_price = self._liquidation_price(position)
+            if liquidation_price is None:
+                continue
+            if position.direction == Direction.LONG:
+                adverse = self._configured_bar_price(
+                    current_bar, self.execution.mark_low_column, "Low"
+                )
+                triggered = adverse is not None and adverse <= liquidation_price
+            else:
+                adverse = self._configured_bar_price(
+                    current_bar, self.execution.mark_high_column, "High"
+                )
+                triggered = adverse is not None and adverse >= liquidation_price
+            if not triggered:
+                continue
+
+            open_price = self._configured_bar_price(
+                current_bar, self.execution.mark_price_column, "Open"
+            )
+            raw_exit = liquidation_price
+            if open_price is not None:
+                if position.direction == Direction.LONG:
+                    raw_exit = min(raw_exit, open_price)
+                else:
+                    raw_exit = max(raw_exit, open_price)
+            exit_direction = self._exit_direction(position.direction)
+            exit_price = self._execution_price(raw_exit, exit_direction)
+            order = self.pipeline.portfolio_engine.close_position(
+                position.symbol,
+                position.layer,
+                fill_price=exit_price,
+                reason="liquidation",
+            )
+            trade = self._trade_from_close(order, "liquidation", timestamp, bar_index)
+            liquidation_fee = (
+                exit_price
+                * position.quantity
+                * self._contract_multiplier(position.symbol)
+                * self._liquidation_fee_rate(position.symbol)
+            )
+            trades.append(
+                replace(
+                    trade,
+                    net_pnl=trade.net_pnl - liquidation_fee,
+                    liquidation_fee=liquidation_fee,
+                )
+            )
+            self._clear_entry_metadata_if_closed(order)
+        return trades
+
+    def _liquidation_price(self, position: Position) -> float | None:
+        leverage = float(self.execution.leverage)
+        maintenance_rate = self._maintenance_margin_rate(position.symbol)
+        if leverage <= 1.0 or maintenance_rate <= 0.0:
+            return None
+        unit_notional = position.quantity * self._contract_multiplier(position.symbol)
+        if unit_notional <= 0:
+            return None
+        maintenance_amount = self._maintenance_amount(position.symbol)
+        adjustment = maintenance_amount / unit_notional
+        if position.direction == Direction.LONG:
+            return max(
+                0.0,
+                (position.entry_price * (1.0 - 1.0 / leverage) - adjustment)
+                / (1.0 - maintenance_rate),
+            )
+        if position.direction == Direction.SHORT:
+            return (
+                position.entry_price * (1.0 + 1.0 / leverage) + adjustment
+            ) / (1.0 + maintenance_rate)
+        return None
+
+    @staticmethod
+    def _configured_bar_price(
+        current_bar: pd.Series,
+        configured_column: str | None,
+        fallback_column: str,
+    ) -> float | None:
+        column = configured_column if configured_column in current_bar.index else fallback_column
+        return EventDrivenBacktest._bar_price(current_bar, column)
+
     def _triggered_exit_fill_quantity(self, position: Position, current_bar: pd.Series) -> float:
         key = (position.symbol, position.layer)
         order_quantity = self._triggered_exit_order_quantities.setdefault(key, position.quantity)
@@ -1699,6 +1903,13 @@ class EventDrivenBacktest:
             cash=cash,
             unrealized_pnl=unrealized,
             equity=cash + unrealized,
+            initial_margin_used=self._margin_requirements(latest_prices)[0],
+            maintenance_margin=self._margin_requirements(latest_prices)[1],
+            available_margin=(
+                cash
+                + unrealized
+                - self._margin_requirements(latest_prices)[0]
+            ),
         )
 
     def _account_with_equity(self, equity: float) -> AccountState:
@@ -1885,15 +2096,62 @@ class EventDrivenBacktest:
             return self._exit_direction(order.existing_position.direction)
         return order.direction
 
-    def _funding_for_symbol(self, symbol: str) -> float:
+    def _funding_for_symbol(self, symbol: str, current_bar: pd.Series | None = None) -> float:
         market = self.markets_by_symbol.get(symbol)
-        if market is None or market.funding_rate is None:
+        feature = self.execution.funding_rate_feature
+        if feature:
+            if current_bar is None or feature not in current_bar.index or pd.isna(current_bar[feature]):
+                return 0.0
+            rate = float(current_bar[feature])
+            mark_price = self._configured_bar_price(
+                current_bar,
+                self.execution.funding_mark_price_feature,
+                "Close",
+            )
+        elif market is not None and market.funding_rate is not None:
+            rate = float(market.funding_rate)
+            mark_price = None
+        else:
             return 0.0
         return sum(
-            position.entry_price
+            (mark_price if mark_price is not None else position.entry_price)
             * position.quantity
             * self._contract_multiplier(position.symbol)
-            * float(market.funding_rate)
+            * rate
+            * (1.0 if position.direction == Direction.LONG else -1.0)
             for position in self.pipeline.portfolio_engine.state.positions.values()
             if position.symbol == symbol
         )
+
+    def _maintenance_margin_rate(self, symbol: str) -> float:
+        market = self.markets_by_symbol.get(symbol)
+        if market is not None and market.maintenance_margin_rate is not None:
+            return float(market.maintenance_margin_rate)
+        return float(self.execution.maintenance_margin_rate)
+
+    def _maintenance_amount(self, symbol: str) -> float:
+        market = self.markets_by_symbol.get(symbol)
+        if market is not None:
+            return float(market.maintenance_amount)
+        return float(self.execution.maintenance_amount)
+
+    def _liquidation_fee_rate(self, symbol: str) -> float:
+        market = self.markets_by_symbol.get(symbol)
+        if market is not None and market.liquidation_fee_rate is not None:
+            return float(market.liquidation_fee_rate)
+        return float(self.execution.liquidation_fee_rate)
+
+    def _margin_requirements(self, latest_prices: Mapping[str, float]) -> tuple[float, float]:
+        leverage = max(float(self.execution.leverage), 1.0)
+        initial = 0.0
+        maintenance = 0.0
+        for position in self.pipeline.portfolio_engine.state.positions.values():
+            mark = latest_prices.get(position.symbol, position.entry_price)
+            notional = abs(mark * position.quantity * self._contract_multiplier(position.symbol))
+            initial += notional / leverage
+            maintenance += max(
+                0.0,
+                notional * self._maintenance_margin_rate(position.symbol)
+                - self._maintenance_amount(position.symbol),
+            )
+        return initial, maintenance

@@ -96,6 +96,7 @@ from quant_platform.features import (
     DerivativesFeatureConfig,
     DerivativesFeatureModule,
     ema as platform_ema,
+    htf_ema as platform_htf_ema,
 )
 from quant_platform.pipeline import PipelineResult, SignalPipeline
 from quant_platform.portfolio import (
@@ -153,9 +154,7 @@ def _macd(close: pd.Series, fast: int, slow: int, signal: int):
 
 
 def _htf_ema(close: pd.Series, rule: str, length: int) -> pd.Series:
-    htf_close = close.resample(rule).last().ffill()
-    htf_ema = _ema(htf_close, length)
-    return htf_ema.reindex(close.index, method="ffill")
+    return platform_htf_ema(close, rule, length)
 
 
 def _rsi(close: pd.Series, period: int = 14) -> pd.Series:

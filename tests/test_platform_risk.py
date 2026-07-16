@@ -161,6 +161,35 @@ class RiskEngineTest(unittest.TestCase):
         self.assertEqual(decision.reason, "portfolio_risk_budget_exhausted")
         self.assertEqual(decision.quantity, 0.0)
 
+    def test_caps_total_notional_to_available_initial_margin(self):
+        from quant_platform.risk import AccountState, RiskEngine, RiskLimits
+
+        engine = RiskEngine(RiskLimits(
+            risk_per_trade=0.50,
+            max_position_fraction=1.0,
+            max_leverage=2.0,
+            enforce_initial_margin=True,
+            portfolio_risk_budget=1.0,
+        ))
+        resized = engine.evaluate(
+            self._signal(preferred_stop=99.0),
+            AccountState(equity=10_000.0),
+            entry_price=100.0,
+            open_notional=15_000.0,
+        )
+        blocked = engine.evaluate(
+            self._signal(preferred_stop=99.0),
+            AccountState(equity=10_000.0),
+            entry_price=100.0,
+            open_notional=20_000.0,
+        )
+
+        self.assertTrue(resized.allowed)
+        self.assertAlmostEqual(resized.notional, 5_000.0)
+        self.assertAlmostEqual(resized.quantity, 50.0)
+        self.assertFalse(blocked.allowed)
+        self.assertEqual(blocked.reason, "initial_margin_exhausted")
+
     def test_budget_gates_use_capped_candidate_risk(self):
         from quant_platform.risk import AccountState, RiskEngine, RiskLimits
 
