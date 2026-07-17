@@ -39,6 +39,7 @@ python run_backtest.py `
   --slippage-bps 2 `
   --spread-column bid_ask_spread `
   --mark-price-column MarkOpen `
+  --mark-close-column MarkClose `
   --mark-high-column MarkHigh `
   --mark-low-column MarkLow `
   --funding-mark-column FundingMarkPrice `
@@ -51,6 +52,22 @@ python run_backtest.py `
 若行情文件含历史盘口点差和 mark-price OHLC，请使用上述列参数；缺列时正式入口会拒绝运行。没有 mark 数据时，强平路径退化为合约 OHLC 的保守代理，并应在报告中明确标记。固定 `--slippage-bps` 应来自 paper/live 成交偏差统计，而不是回测调参。
 
 输出位于 `artifacts/backtests/`，包含 `summary.json`、`trades.csv` 和 `equity.csv`。旧 Dual 回测仅作为受控对照保留在 `scripts/run_legacy_backtest.py`，不得作为模拟盘或实盘准入结果。
+
+## 连续特征消融与杠杆研究
+
+本轮按“每次只测试一个连续特征族”的原则评估了市场结构序列、支撑阻力强度、Gap/跳跃风险和 EMA 连续强度。没有候选通过跨 BTC/ETH/SOL 的预注册门槛，2025-2026 研究留出集在成本与 funding 后三币均为负，因此正式配置保持 `research_only`，不启用实盘杠杆。完整结果见 [`docs/feature_ablation_report_20260716.md`](docs/feature_ablation_report_20260716.md)。
+
+复现实验（需要冻结 OHLCV 快照以及 `data/derivatives/` 下的 Binance 历史 funding/mark 数据）：
+
+```powershell
+python -m scripts.run_feature_ablation `
+  --variants baseline_full,ema_core_bear,sequence_core_bear,sequence_support_resistance,sequence_jump_risk,ema_continuous_strength,ema_support_resistance,ema_jump_risk `
+  --splits validation `
+  --leverages 1 `
+  --output artifacts/backtests/feature_ablation_validation_final
+```
+
+实验切分、成本和晋级门槛固化在 [`config/feature_research_protocol.json`](config/feature_research_protocol.json)。
 
 ## 目录
 

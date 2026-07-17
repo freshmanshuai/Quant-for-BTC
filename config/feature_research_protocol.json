@@ -1,0 +1,44 @@
+{
+  "protocol_id": "continuous_price_action_v1",
+  "timeframe": "4h",
+  "common_warmup_start": "2020-09-14T04:00:00Z",
+  "development": ["2021-07-01T00:00:00Z", "2023-12-31T23:59:59Z"],
+  "validation": ["2024-01-01T00:00:00Z", "2024-12-31T23:59:59Z"],
+  "research_holdout": ["2025-01-01T00:00:00Z", "2026-06-30T23:59:59Z"],
+  "selection_leverage": 1.0,
+  "stress_leverage": [1.0, 2.0, 3.0, 5.0],
+  "execution": {
+    "fee_rate_per_fill": 0.0005,
+    "slippage_bps_per_fill": 2.0,
+    "fill": "next_bar_open",
+    "margin_mode": "isolated_proxy",
+    "maintenance_margin_rate": 0.004,
+    "maintenance_amount": 0.0,
+    "liquidation_fee_rate": 0.0125
+  },
+  "variant_order": [
+    "baseline_full",
+    "ema_core_bear",
+    "sequence_core_bear",
+    "sequence_support_resistance",
+    "sequence_jump_risk",
+    "ema_continuous_strength",
+    "ema_support_resistance",
+    "ema_jump_risk"
+  ],
+  "promotion_rule": {
+    "positive_metric": "delta_calmar",
+    "minimum_positive_assets": 2,
+    "median_delta_calmar": 0.10,
+    "worst_delta_cagr_percentage_points": -2.0,
+    "maximum_drawdown_deterioration_percentage_points": 3.0,
+    "minimum_trades_pooled": 50,
+    "minimum_trades_per_asset": 10
+  },
+  "notes": [
+    "Feature selection is performed at 1x before leverage stress testing.",
+    "The 2025-2026 interval is a research holdout, not truly unseen OOS, because prior audit work inspected the full history.",
+    "Funding and mark-price archives are historical; fee, slippage, and maintenance tiers remain fixed research assumptions.",
+    "EMA-based continuous variants are the pre-declared second iteration after sequence replacement failed cross-asset validation; they are still tested one family at a time."
+  ]
+}

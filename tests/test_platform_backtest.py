@@ -2491,9 +2491,9 @@ class EventDrivenBacktestTest(unittest.TestCase):
         self.assertAlmostEqual(trade.entry_fee, 2.1)
         self.assertAlmostEqual(trade.exit_fee, 2.3)
         self.assertAlmostEqual(trade.net_pnl, 95.6)
-        self.assertAlmostEqual(result.funding_paid, 0.315)
+        self.assertAlmostEqual(result.funding_paid, 0.21)
         self.assertAlmostEqual(result.fees_paid, 4.4)
-        self.assertAlmostEqual(result.equity_curve[-1].equity, 10095.285)
+        self.assertAlmostEqual(result.equity_curve[-1].equity, 10095.39)
 
 
 if __name__ == "__main__":

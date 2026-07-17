@@ -39,6 +39,41 @@ class RiskEngineTest(unittest.TestCase):
         self.assertAlmostEqual(decision.notional, 5_000.0)
         self.assertEqual(decision.reason, "allowed")
 
+    def test_signal_confidence_only_scales_risk_when_explicitly_enabled(self):
+        from quant_platform.risk import AccountState, RiskEngine, RiskLimits
+
+        common = {
+            "risk_per_trade": 0.01,
+            "max_position_fraction": 1.0,
+            "max_leverage": 1.0,
+            "portfolio_risk_budget": 1.0,
+        }
+        signal = self._signal(preferred_stop=95.0, confidence=0.5)
+        account = AccountState(equity=10_000.0)
+
+        default = RiskEngine(RiskLimits(**common)).evaluate(signal, account, entry_price=100.0)
+        scaled = RiskEngine(RiskLimits(**common, use_signal_confidence=True)).evaluate(
+            signal, account, entry_price=100.0
+        )
+
+        self.assertAlmostEqual(default.risk_amount, 100.0)
+        self.assertAlmostEqual(scaled.risk_amount, 50.0)
+        self.assertAlmostEqual(scaled.quantity, default.quantity / 2.0)
+
+    def test_non_finite_signal_confidence_fails_closed(self):
+        from quant_platform.risk import AccountState, RiskEngine, RiskLimits
+
+        decision = RiskEngine(
+            RiskLimits(use_signal_confidence=True, portfolio_risk_budget=1.0)
+        ).evaluate(
+            self._signal(confidence=float("nan")),
+            AccountState(equity=10_000.0),
+            entry_price=100.0,
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "zero_quantity")
+
     def test_market_spec_blocks_unsupported_shorts_and_leverage(self):
         from quant_platform.core import AssetSpec, MarketSpec
         from quant_platform.risk import AccountState, RiskEngine, RiskLimits

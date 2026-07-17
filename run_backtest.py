@@ -41,6 +41,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--slippage-bps", type=float, default=2.0)
     parser.add_argument("--spread-column", help="Observed absolute bid/ask spread feature")
     parser.add_argument("--mark-price-column", help="Historical mark-price/open feature")
+    parser.add_argument("--mark-close-column", help="Historical mark-price/close feature")
     parser.add_argument("--mark-high-column", help="Historical intrabar mark high feature")
     parser.add_argument("--mark-low-column", help="Historical intrabar mark low feature")
     parser.add_argument("--funding-mark-column", help="Mark price aligned to funding cash flows")
@@ -101,6 +102,7 @@ def run(args: argparse.Namespace):
         for name in (
             args.spread_column,
             args.mark_price_column,
+            args.mark_close_column,
             args.mark_high_column,
             args.mark_low_column,
             args.funding_mark_column,
@@ -139,6 +141,7 @@ def run(args: argparse.Namespace):
                 max_position_fraction=1.0,
                 max_leverage=args.leverage,
                 enforce_initial_margin=True,
+                use_signal_confidence=True,
                 portfolio_risk_budget=0.02,
                 max_module_risk=0.01,
                 module_risk_multipliers={"bear_core": 0.5, "pullback_long": 0.35},
@@ -176,6 +179,7 @@ def run(args: argparse.Namespace):
             entry_spread_feature=args.spread_column,
             exit_spread_feature=args.spread_column,
             mark_price_column=args.mark_price_column,
+            mark_close_column=args.mark_close_column,
             mark_high_column=args.mark_high_column,
             mark_low_column=args.mark_low_column,
             finalize_positions=True,

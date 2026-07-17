@@ -64,6 +64,7 @@ class BacktestExecutionConfig:
     maintenance_amount: float = 0.0
     liquidation_fee_rate: float = 0.0
     mark_price_column: str | None = None
+    mark_close_column: str | None = None
     mark_high_column: str | None = None
     mark_low_column: str | None = None
     finalize_positions: bool = False
@@ -987,6 +988,13 @@ class EventDrivenBacktest:
         self.pipeline = pipeline
         self.account = account
         self.execution = execution or BacktestExecutionConfig()
+        if (
+            self.execution.min_order_age_bars > 0
+            and self.pipeline.portfolio_engine.precreate_positions
+        ):
+            raise ValueError(
+                "delayed execution requires PortfolioEngine(precreate_positions=False)"
+            )
         self.markets_by_symbol = dict(markets_by_symbol or {})
         self._triggered_exit_order_quantities: dict[tuple[str, str], float] = {}
         self._position_entries: dict[PositionKey, tuple[object, int]] = {}
@@ -1010,6 +1018,7 @@ class EventDrivenBacktest:
         latency_recorded_order_ids: set[str] = set()
         last_bar_by_symbol: dict[str, int] = {}
         latest_prices: dict[str, float] = {}
+        latest_execution_prices: dict[str, float] = {}
         cash = self.account.equity
         realized_pnl = 0.0
         fees_paid = 0.0
@@ -1027,10 +1036,110 @@ class EventDrivenBacktest:
             window = features.iloc[: bar_index + 1]
             current_bar = window.iloc[-1]
             signal_price = float(current_bar["Close"]) if "Close" in window.columns else None
+            if signal_price is not None:
+                latest_execution_prices[symbol] = signal_price
             fill_column = self.execution.fill_price_column
             fill_price = float(current_bar[fill_column]) if fill_column in window.columns else signal_price
-            if signal_price is not None:
-                latest_prices[symbol] = signal_price
+            # Funding settles at the bar-open timestamp. Charge positions that
+            # crossed the settlement before executing orders at that open.
+            event_funding = self._funding_for_symbol(symbol, current_bar)
+            funding_paid += event_funding
+            cash -= event_funding
+
+            delayed_execution = self.execution.min_order_age_bars > 0
+            if delayed_execution:
+                # Orders submitted from an earlier close execute at this bar's
+                # open before this bar's high/low path and close-time decision.
+                carried_trades = self._close_liquidated_positions(
+                    symbol,
+                    current_bar,
+                    timestamp,
+                    bar_index,
+                    open_only=True,
+                )
+                gap_stale_orders = self._cancel_orders_without_positions(symbol)
+                terminal_orders.extend(gap_stale_orders)
+                self._record_order_latency(
+                    order_latency,
+                    latency_recorded_order_ids,
+                    gap_stale_orders,
+                    order_first_seen_bar,
+                    bar_index,
+                )
+                carried_orders = self._event_submitted_orders(symbol, [])
+                self._track_submitted_order_first_seen(
+                    order_first_seen_bar, carried_orders, bar_index
+                )
+                carried_fills, carried_entry_fees = self._fill_submitted_orders(
+                    carried_orders,
+                    fill_price,
+                    current_bar,
+                    order_first_seen_bar,
+                    bar_index,
+                )
+                filled_orders.extend(carried_fills)
+                carried_expired = self._cancel_expired_orders(
+                    carried_orders, order_first_seen_bar, bar_index
+                )
+                terminal_orders.extend(carried_expired)
+                self._record_order_latency(
+                    order_latency,
+                    latency_recorded_order_ids,
+                    carried_fills + carried_expired,
+                    order_first_seen_bar,
+                    bar_index,
+                )
+                fees_paid += carried_entry_fees
+                cash -= carried_entry_fees
+                carried_trades.extend(
+                    self._trades_from_event_fills(
+                        carried_fills, timestamp, bar_index
+                    )
+                )
+                carried_trades.extend(
+                    self._close_liquidated_positions(
+                        symbol,
+                        current_bar,
+                        timestamp,
+                        bar_index,
+                    )
+                )
+                carried_trades.extend(
+                    self._close_triggered_positions(
+                        symbol,
+                        current_bar,
+                        signal_price,
+                        [],
+                        timestamp,
+                        bar_index,
+                    )
+                )
+                stale_orders = self._cancel_orders_without_positions(symbol)
+                terminal_orders.extend(stale_orders)
+                self._record_order_latency(
+                    order_latency,
+                    latency_recorded_order_ids,
+                    stale_orders,
+                    order_first_seen_bar,
+                    bar_index,
+                )
+                trades.extend(carried_trades)
+                self._record_risk_trade_feedback(carried_trades, bar_index)
+                carried_exit_fees = sum(trade.exit_fee for trade in carried_trades)
+                carried_liquidation_fees = sum(
+                    trade.liquidation_fee for trade in carried_trades
+                )
+                carried_realized = sum(trade.gross_pnl for trade in carried_trades)
+                realized_pnl += carried_realized
+                fees_paid += carried_exit_fees + carried_liquidation_fees
+                liquidation_fees_paid += carried_liquidation_fees
+                cash += carried_realized - carried_exit_fees - carried_liquidation_fees
+
+            account_mark = self._configured_bar_price(
+                current_bar, self.execution.mark_close_column, "Close"
+            )
+            if account_mark is not None:
+                latest_prices[symbol] = account_mark
             account = self._account_with_equity(
                 self._equity_point(symbol, timestamp, bar_index, cash, latest_prices).equity
             )
@@ -1045,16 +1154,22 @@ class EventDrivenBacktest:
             event_fills = self._already_filled_internal_orders(result.portfolio_plan.orders)
             event_orders = self._event_submitted_orders(symbol, result.portfolio_plan.orders)
             self._track_submitted_order_first_seen(order_first_seen_bar, event_orders, bar_index)
-            submitted_fills, submitted_entry_fees = self._fill_submitted_orders(
-                event_orders,
-                fill_price,
-                current_bar,
-                order_first_seen_bar,
-                bar_index,
-            )
+            if delayed_execution:
+                submitted_fills, submitted_entry_fees = [], 0.0
+                expired_orders = []
+            else:
+                submitted_fills, submitted_entry_fees = self._fill_submitted_orders(
+                    event_orders,
+                    fill_price,
+                    current_bar,
+                    order_first_seen_bar,
+                    bar_index,
+                )
+                expired_orders = self._cancel_expired_orders(
+                    event_orders, order_first_seen_bar, bar_index
+                )
             event_fills.extend(submitted_fills)
             filled_orders.extend(event_fills)
-            expired_orders = self._cancel_expired_orders(event_orders, order_first_seen_bar, bar_index)
             terminal_orders.extend(expired_orders)
             self._record_order_latency(
                 order_latency,
@@ -1066,28 +1181,26 @@ class EventDrivenBacktest:
             event_fees = submitted_entry_fees
             fees_paid += event_fees
             cash -= event_fees
-            event_funding = self._funding_for_symbol(symbol, current_bar)
-            funding_paid += event_funding
-            cash -= event_funding
             event_trades = self._trades_from_event_fills(event_fills, timestamp, bar_index)
-            event_trades.extend(
-                self._close_liquidated_positions(
-                    symbol,
-                    current_bar,
-                    timestamp,
-                    bar_index,
+            if not delayed_execution:
+                event_trades.extend(
+                    self._close_liquidated_positions(
+                        symbol,
+                        current_bar,
+                        timestamp,
+                        bar_index,
+                    )
                 )
-            )
-            event_trades.extend(
-                self._close_triggered_positions(
-                    symbol,
-                    window.iloc[-1],
-                    fill_price,
-                    event_fills,
-                    timestamp,
-                    bar_index,
+                event_trades.extend(
+                    self._close_triggered_positions(
+                        symbol,
+                        window.iloc[-1],
+                        fill_price,
+                        event_fills,
+                        timestamp,
+                        bar_index,
+                    )
                 )
-            )
             trades.extend(event_trades)
             self._record_risk_trade_feedback(event_trades, bar_index)
             exit_fees = sum(trade.exit_fee for trade in event_trades)
@@ -1123,7 +1236,7 @@ class EventDrivenBacktest:
                 events, key=lambda event: (event[0], event[1])
             )[-1]
             final_orders, final_trades = self._finalize_open_positions(
-                latest_prices,
+                latest_execution_prices,
                 final_timestamp,
                 final_bar_index,
             )
@@ -1317,6 +1430,33 @@ class EventDrivenBacktest:
             order_first_seen_bar,
             bar_index,
         )
+
+    def _cancel_orders_without_positions(self, symbol: str) -> list[PortfolioOrder]:
+        """Cancel stale exits/rebalances after an intrabar close or liquidation."""
+        positions = self.pipeline.portfolio_engine.state.positions
+        canceled: list[PortfolioOrder] = []
+        for order in list(self.pipeline.portfolio_engine.state.orders.values()):
+            if order.symbol != symbol or order.status not in {
+                OrderStatus.SUBMITTED,
+                OrderStatus.PARTIALLY_FILLED,
+            }:
+                continue
+            if PositionKey(order.symbol, order.layer) in positions:
+                continue
+            stale_exit = order.action in {OrderAction.CLOSE, OrderAction.REBALANCE}
+            stale_partial_entry = (
+                order.action == OrderAction.OPEN
+                and order.status == OrderStatus.PARTIALLY_FILLED
+            )
+            if not (stale_exit or stale_partial_entry):
+                continue
+            canceled.append(
+                self.pipeline.portfolio_engine.cancel_order(
+                    order.order_id,
+                    reason="position_closed_before_order_completion",
+                )
+            )
+        return canceled
 
     def _cancel_expired_entry_orders(
         self,
@@ -1639,6 +1779,8 @@ class EventDrivenBacktest:
         current_bar: pd.Series,
         timestamp: object,
         bar_index: int,
+        *,
+        open_only: bool = False,
     ) -> list[BacktestTrade]:
         """Liquidate positions whose adverse mark breaches maintenance margin."""
         trades: list[BacktestTrade] = []
@@ -1651,7 +1793,19 @@ class EventDrivenBacktest:
             liquidation_price = self._liquidation_price(position)
             if liquidation_price is None:
                 continue
-            if position.direction == Direction.LONG:
+            if open_only:
+                adverse = self._configured_bar_price(
+                    current_bar, self.execution.mark_price_column, "Open"
+                )
+                triggered = (
+                    adverse is not None
+                    and (
+                        adverse <= liquidation_price
+                        if position.direction == Direction.LONG
+                        else adverse >= liquidation_price
+                    )
+                )
+            elif position.direction == Direction.LONG:
                 adverse = self._configured_bar_price(
                     current_bar, self.execution.mark_low_column, "Low"
                 )

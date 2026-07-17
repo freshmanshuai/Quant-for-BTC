@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from quant_platform.core import MarketSpec
@@ -25,6 +26,7 @@ class RiskLimits:
     max_position_fraction: float = 1.0
     max_leverage: float = 1.0
     enforce_initial_margin: bool = False
+    use_signal_confidence: bool = False
     portfolio_risk_budget: float = 0.06
     max_symbol_risk: float | None = None
     max_module_risk: float | None = None
@@ -212,7 +214,21 @@ class RiskEngine:
 
         multiplier = self.state.size_multiplier(self.limits)
         module_multiplier = float(self.limits.module_risk_multipliers.get(signal.module, 1.0))
-        target_risk = account.equity * self.limits.risk_per_trade * multiplier * module_multiplier
+        signal_confidence = float(signal.confidence)
+        confidence_multiplier = 1.0
+        if self.limits.use_signal_confidence:
+            confidence_multiplier = (
+                max(0.0, min(1.0, signal_confidence))
+                if math.isfinite(signal_confidence)
+                else 0.0
+            )
+        target_risk = (
+            account.equity
+            * self.limits.risk_per_trade
+            * multiplier
+            * module_multiplier
+            * confidence_multiplier
+        )
         contract_multiplier = self._contract_multiplier(signal.symbol)
         max_loss_per_unit = stop_distance * contract_multiplier
         raw_quantity = target_risk / max_loss_per_unit

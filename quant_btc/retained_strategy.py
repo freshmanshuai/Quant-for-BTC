@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+from quant_btc.price_action import add_continuous_price_action_features, confidence_multiplier
 from quant_platform.features import atr, ema, htf_ema
 from quant_platform.signals import Direction, Signal
 
@@ -20,6 +21,9 @@ class RetainedStrategyConfig:
     pullback_ema_length: int = 20
     pullback_stop_atr: float = 2.0
     pullback_target_atr: float = 4.0
+    trend_model: str = "ema"
+    structure_deadband: float = 0.05
+    confidence_features: tuple[str, ...] = ()
 
 
 def prepare_retained_features(
@@ -30,11 +34,33 @@ def prepare_retained_features(
 ) -> pd.DataFrame:
     """Build point-in-time features and attach funding only at settlement rows."""
     cfg = config or RetainedStrategyConfig()
+    supported_confidence = {"ema_strength", "support_resistance", "jump_risk"}
+    unknown_confidence = set(cfg.confidence_features).difference(supported_confidence)
+    if unknown_confidence:
+        raise ValueError(f"unsupported confidence features: {sorted(unknown_confidence)}")
     out = bars.copy()
     out["_atr"] = atr(out["High"], out["Low"], out["Close"], cfg.atr_period)
     out["_daily_ema"] = htf_ema(out["Close"], "1D", cfg.daily_ema_length)
     out["_weekly_ema"] = htf_ema(out["Close"], "1W", cfg.weekly_ema_length)
     out["_pullback_ema"] = ema(out["Close"], cfg.pullback_ema_length)
+    if "ema_strength" in cfg.confidence_features:
+        distance_scale = (6.0 * out["_atr"]).replace(0.0, float("nan"))
+        out["_ema_strength"] = (
+            (
+                (out["Close"] - out["_daily_ema"])
+                + (out["Close"] - out["_weekly_ema"])
+            )
+            / (2.0 * distance_scale)
+        ).clip(-1.0, 1.0)
+    price_action_families = set(cfg.confidence_features).difference({"ema_strength"})
+    if cfg.trend_model == "sequence":
+        price_action_families.add("structure")
+    if price_action_families:
+        out = add_continuous_price_action_features(
+            out,
+            atr_values=out["_atr"],
+            families=tuple(sorted(price_action_families)),
+        )
     out["funding_rate"] = float("nan")
     if derivatives is not None and not derivatives.empty:
         rates = pd.to_numeric(derivatives["funding_rate"], errors="coerce")
@@ -76,13 +102,15 @@ class CoreTrendModule:
 
     def generate(self, features: pd.DataFrame, symbol: str) -> list[Signal]:
         row = features.iloc[-1]
-        if pd.isna(row["_daily_ema"]) or pd.isna(row["_weekly_ema"]):
+        trend_score = _trend_score(row, self.config)
+        if trend_score is None:
             return []
         close = float(row["Close"])
-        if not (close > float(row["_daily_ema"]) and close > float(row["_weekly_ema"])):
+        if trend_score <= self.config.structure_deadband:
             return []
         stop = close - self.config.core_stop_atr * float(row["_atr"])
-        return [_signal("core_long", symbol, Direction.LONG, close, stop, None, 80.0)]
+        confidence = _adjusted_confidence(1.0, row, Direction.LONG, self.config)
+        return [_signal("core_long", symbol, Direction.LONG, close, stop, None, 80.0, confidence)]
 
 
 class BearTrendModule:
@@ -93,13 +121,15 @@ class BearTrendModule:
 
     def generate(self, features: pd.DataFrame, symbol: str) -> list[Signal]:
         row = features.iloc[-1]
-        if pd.isna(row["_daily_ema"]) or pd.isna(row["_weekly_ema"]):
+        trend_score = _trend_score(row, self.config)
+        if trend_score is None:
             return []
         close = float(row["Close"])
-        if not (close < float(row["_daily_ema"]) and close < float(row["_weekly_ema"])):
+        if trend_score >= -self.config.structure_deadband:
             return []
         stop = close + self.config.bear_stop_atr * float(row["_atr"])
-        return [_signal("bear_core", symbol, Direction.SHORT, close, stop, None, 75.0)]
+        confidence = _adjusted_confidence(1.0, row, Direction.SHORT, self.config)
+        return [_signal("bear_core", symbol, Direction.SHORT, close, stop, None, 75.0, confidence)]
 
 
 class PullbackLongModule:
@@ -117,7 +147,8 @@ class PullbackLongModule:
         if any(pd.isna(row[name]) for name in required):
             return []
         close = float(row["Close"])
-        in_uptrend = close > float(row["_daily_ema"]) and close > float(row["_weekly_ema"])
+        trend_score = _trend_score(row, self.config)
+        in_uptrend = trend_score is not None and trend_score > self.config.structure_deadband
         resumed = (
             float(previous["Low"]) <= float(previous["_pullback_ema"])
             and close > float(row["_pullback_ema"])
@@ -128,7 +159,8 @@ class PullbackLongModule:
         atr_value = float(row["_atr"])
         stop = min(float(row["Low"]), close - self.config.pullback_stop_atr * atr_value)
         target = close + self.config.pullback_target_atr * atr_value
-        return [_signal("pullback_long", symbol, Direction.LONG, close, stop, target, 70.0)]
+        confidence = _adjusted_confidence(1.0, row, Direction.LONG, self.config)
+        return [_signal("pullback_long", symbol, Direction.LONG, close, stop, target, 70.0, confidence)]
 
 
 def _signal(
@@ -139,6 +171,7 @@ def _signal(
     stop: float,
     target: float | None,
     score: float,
+    confidence: float,
 ) -> Signal:
     return Signal(
         module=module,
@@ -149,5 +182,33 @@ def _signal(
         invalidation="completed-bar trend/ATR invalidation",
         preferred_stop=stop,
         preferred_target=target,
-        confidence=score / 100.0,
+        confidence=confidence,
+    )
+
+
+def _trend_score(row: pd.Series, config: RetainedStrategyConfig) -> float | None:
+    if config.trend_model == "sequence":
+        value = row.get("_structure_score")
+        return None if pd.isna(value) else float(value)
+    if config.trend_model != "ema":
+        raise ValueError(f"unsupported trend_model: {config.trend_model}")
+    if pd.isna(row.get("_daily_ema")) or pd.isna(row.get("_weekly_ema")):
+        return None
+    close = float(row["Close"])
+    if close > float(row["_daily_ema"]) and close > float(row["_weekly_ema"]):
+        return 1.0
+    if close < float(row["_daily_ema"]) and close < float(row["_weekly_ema"]):
+        return -1.0
+    return 0.0
+
+
+def _adjusted_confidence(
+    base: float,
+    row: pd.Series,
+    direction: Direction,
+    config: RetainedStrategyConfig,
+) -> float:
+    return max(
+        0.05,
+        min(1.0, base * confidence_multiplier(row, direction, config.confidence_features)),
     )

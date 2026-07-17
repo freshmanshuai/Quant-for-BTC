@@ -1,6 +1,22 @@
 {
   "strategy": "retained_expert_system_v1",
   "classification": "rule_based_expert_system",
+  "deployment": {
+    "status": "research_only",
+    "live_trading_enabled": false,
+    "maximum_research_leverage": 1.0,
+    "reason": "The 2025-01 through 2026-06 research holdout is net negative for BTC, ETH, and SOL after costs and funding."
+  },
+  "active_feature_scheme": {
+    "direction": [
+      "causal_completed_daily_ema",
+      "causal_completed_weekly_ema",
+      "pullback_ema"
+    ],
+    "risk_scale_only": ["atr"],
+    "cash_flow_only": ["historical_funding_rate"],
+    "candidate_features_enabled": []
+  },
   "retained_modules": {
     "core_long": {"layer": "core", "risk_multiplier": 1.0},
     "bear_core": {"layer": "core", "risk_multiplier": 0.5},
@@ -19,6 +35,21 @@
     "derivative_bonus",
     "manual_score"
   ],
+  "validation_decisions_20260716": {
+    "retained_pending_more_evidence": ["pullback_long"],
+    "rejected_feature_candidates": [
+      "market_structure_sequence",
+      "support_resistance_strength",
+      "gap_jump_risk_scaling",
+      "ema_continuous_strength"
+    ],
+    "deferred_until_point_in_time_data_exists": [
+      "quote_turnover_impact",
+      "taker_order_flow_imbalance",
+      "open_interest"
+    ],
+    "report": "docs/feature_ablation_report_20260716.md"
+  },
   "execution_defaults": {
     "venue": "binance",
     "market_type": "swap",
@@ -28,7 +59,7 @@
     "signal_price": "close",
     "fill_price": "next_open",
     "funding": "historical_settlement_ledger_required",
-    "margin_mode": "isolated",
+    "margin_mode": "isolated_proxy",
     "enforce_initial_margin": true,
     "maintenance_margin_rate": 0.004,
     "maintenance_amount": 0.0,
@@ -38,6 +69,7 @@
   "notes": [
     "Fee and risk-tier values must be overridden with the account and symbol's actual Binance settings.",
     "Slippage is an explicit conservative model input, not an exchange constant.",
-    "The canonical runner fails closed when the funding ledger does not cover the bar window."
+    "The canonical runner fails closed when the funding ledger does not cover the bar window.",
+    "Configured leverage is not a target position size; leverage stress must also report realized gross notional divided by equity."
   ]
 }
