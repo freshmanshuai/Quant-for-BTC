@@ -1,0 +1,47 @@
+{
+  "protocol_id": "simple_linear_intraday_v1",
+  "timeframe": "15m",
+  "training_data_start": "2023-08-24T08:00:00Z",
+  "validation": ["2024-07-01T00:00:00Z", "2024-12-31T23:59:59Z"],
+  "research_holdout": ["2025-01-01T00:00:00Z", "2026-06-30T23:59:59Z"],
+  "model": {
+    "type": "pooled_monthly_expanding_ridge",
+    "prediction_horizon_bars": 16,
+    "ridge_alpha": 10.0,
+    "minimum_training_rows_per_asset": 2000,
+    "intercept_used_as_signal": false
+  },
+  "features": {
+    "ema_period": 20,
+    "rsi_period": 14,
+    "volume_period": 20,
+    "atr_period": 14
+  },
+  "variants": {
+    "ridge_ema": ["_ml_ema_distance"],
+    "ridge_ema_rsi": ["_ml_ema_distance", "_ml_rsi"],
+    "ridge_ema_rsi_volume": ["_ml_ema_distance", "_ml_rsi", "_ml_volume_zscore"],
+    "ridge_ema_rsi_volume_atr": ["_ml_ema_distance", "_ml_rsi", "_ml_volume_zscore", "_ml_atr_fraction"]
+  },
+  "execution": {
+    "decision": "15m_bar_close",
+    "fill": "first_available_next_15m_open_proxy",
+    "fee_rate_per_fill": 0.0005,
+    "slippage_bps_per_fill": 2.0,
+    "entry_threshold": 0.0014,
+    "configured_leverage": 1.0,
+    "mark_price": "contract_ohlc_proxy"
+  },
+  "promotion_rule": {
+    "minimum_profitable_assets": 2,
+    "minimum_assets_beating_ema_baseline_calmar": 2,
+    "minimum_round_trip_equivalents_per_asset": 10
+  },
+  "notes": [
+    "The 14 bps entry threshold equals one assumed round trip: two fills at 5 bps fee plus 2 bps slippage each.",
+    "The model is additive and contains no interaction terms.",
+    "The 2025-2026 interval is pseudo-OOS because the repository audit has already inspected it.",
+    "Fifteen-minute OHLCV is an intraday proxy, not tick-level high-frequency data.",
+    "No 15-minute mark-price archive is available, so this screen cannot validate liquidation mechanics. It remains fixed at 1x."
+  ]
+}

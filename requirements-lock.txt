@@ -6,3 +6,4 @@ backtesting==0.6.5
 matplotlib==3.10.9
 flask==2.2.2
 requests==2.33.1
+torch==2.6.0

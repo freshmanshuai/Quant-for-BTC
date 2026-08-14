@@ -1,0 +1,98 @@
+{
+  "protocol_id": "medium_lstm_intraday_v1",
+  "timeframe": "15m",
+  "validation": {
+    "training_cutoff": "2024-07-01T00:00:00Z",
+    "start": "2024-07-01T00:00:00Z",
+    "end": "2024-12-31T23:59:59Z"
+  },
+  "research_holdout": {
+    "training_cutoff": "2025-01-01T00:00:00Z",
+    "start": "2025-01-01T00:00:00Z",
+    "end": "2026-06-30T23:59:59Z"
+  },
+  "features": {
+    "ema_periods": [55, 69, 144, 169],
+    "rsi_period": 14,
+    "atr_period": 14,
+    "volume_period": 20,
+    "boll_period": 20,
+    "boll_std": 2.0,
+    "level_lookback": 96
+  },
+  "model": {
+    "sequence_length": 96,
+    "prediction_horizon_bars": 16,
+    "hidden_size": 64,
+    "num_layers": 2,
+    "dropout": 0.2,
+    "head_size": 32,
+    "batch_size": 512,
+    "prediction_batch_size": 2048,
+    "learning_rate": 0.001,
+    "weight_decay": 0.0001,
+    "max_epochs": 20,
+    "patience": 4,
+    "validation_days": 30,
+    "huber_delta_bps": 10.0,
+    "minimum_training_sequences_per_asset": 2000,
+    "seeds": [11, 23, 37]
+  },
+  "variants": {
+    "lstm_core": [
+      "_lstm_ema_55_distance",
+      "_lstm_ema_69_distance",
+      "_lstm_ema_144_distance",
+      "_lstm_ema_169_distance",
+      "_lstm_rsi_14",
+      "_lstm_atr_14_fraction",
+      "_lstm_volume_zscore"
+    ],
+    "lstm_core_boll": [
+      "_lstm_ema_55_distance",
+      "_lstm_ema_69_distance",
+      "_lstm_ema_144_distance",
+      "_lstm_ema_169_distance",
+      "_lstm_rsi_14",
+      "_lstm_atr_14_fraction",
+      "_lstm_volume_zscore",
+      "_lstm_boll_position",
+      "_lstm_boll_width"
+    ],
+    "lstm_full": [
+      "_lstm_ema_55_distance",
+      "_lstm_ema_69_distance",
+      "_lstm_ema_144_distance",
+      "_lstm_ema_169_distance",
+      "_lstm_rsi_14",
+      "_lstm_atr_14_fraction",
+      "_lstm_volume_zscore",
+      "_lstm_boll_position",
+      "_lstm_boll_width",
+      "_lstm_support_distance",
+      "_lstm_resistance_distance"
+    ]
+  },
+  "execution": {
+    "decision": "15m_bar_close",
+    "fill": "first_available_next_15m_open_proxy",
+    "fee_rate_per_fill": 0.0005,
+    "slippage_bps_per_fill": 2.0,
+    "entry_threshold": 0.0014,
+    "configured_leverage": 1.0,
+    "mark_price": "contract_ohlc_proxy"
+  },
+  "promotion_rule": {
+    "minimum_profitable_assets": 2,
+    "minimum_assets_beating_same_feature_ridge_calmar": 2,
+    "minimum_seeds": 3,
+    "minimum_round_trip_equivalents_per_asset": 10
+  },
+  "notes": [
+    "The network is a two-layer, unidirectional LSTM with 64 hidden units and a 32-unit nonlinear head.",
+    "Feature families are added in order: core indicators, BOLL, then causal support/resistance distances.",
+    "Every split uses one frozen model trained before that split; there is no retraining inside the prediction window.",
+    "The 2025-2026 interval remains pseudo-OOS because prior audits inspected it.",
+    "Fifteen-minute OHLCV is not tick-level high-frequency data, and 15-minute mark prices are unavailable."
+  ]
+}

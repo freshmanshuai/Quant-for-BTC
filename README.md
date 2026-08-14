@@ -69,6 +69,20 @@ python -m scripts.run_feature_ablation `
 
 实验切分、成本和晋级门槛固化在 [`config/feature_research_protocol.json`](config/feature_research_protocol.json)。
 
+## LSTM 时序模型研究
+
+中等复杂 LSTM 使用 EMA55/69/144/169、RSI14、ATR14、成交量、BOLL 以及因果支撑/压力距离。网络为双层单向 LSTM（hidden size 64）和 32 单元输出头，按三个随机种子分别训练。完整特征版本没有通过 BTC/ETH/SOL 的跨资产门槛，因此保持 `research_only`，不接入正式 Alpha。完整结果见 [`docs/lstm_intraday_report_20260809.md`](docs/lstm_intraday_report_20260809.md)。
+
+复现实验需要安装 PyTorch，并建议使用 CUDA：
+
+```powershell
+python -m scripts.run_lstm_intraday `
+  --device cuda `
+  --output artifacts/backtests/lstm_medium_20260809
+```
+
+模型检查点包含权重、特征顺序、网络参数以及各币种训练期标准化参数。
+
 ## 目录
 
 ```text
